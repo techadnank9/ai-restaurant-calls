@@ -6,7 +6,28 @@ a { color: inherit; text-decoration: none; }
 .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { border-bottom: 1px solid #eceff3; padding: 10px; text-align: left; font-size: 14px; }
-.nav { display: flex; gap: 12px; margin-bottom: 20px; }
+.nav { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+.nav-link, .nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 42px;
+  padding: 0 14px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.nav-link { color: #1f2937; }
+.nav-link:hover { background: #eef2f7; }
+.nav-link-active { background: #e8edf5; border-color: #d7dfe9; }
+.nav-btn {
+  background: #ffffff;
+  color: #111827;
+  border-color: #d1d5db;
+  margin-left: 6px;
+}
+.nav-btn:hover { background: #f3f4f6; }
 .input, textarea, button { font: inherit; }
 .input, textarea { width: 100%; border: 1px solid #d1d5db; border-radius: 8px; padding: 10px; }
 button { border: 0; background: #111827; color: #fff; border-radius: 8px; padding: 10px 14px; cursor: pointer; }

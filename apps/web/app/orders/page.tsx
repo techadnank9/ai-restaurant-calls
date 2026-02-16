@@ -19,6 +19,7 @@ type Order = {
   pickup_time: string;
   status: string;
   created_at: string;
+  transcript?: string | null;
   items_json?: OrderItem[] | null;
 };
 
@@ -30,10 +31,14 @@ function formatTime(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function orderName(order: Order) {
-  const firstItem = Array.isArray(order.items_json) ? order.items_json[0] : undefined;
-  if (firstItem?.name) return firstItem.name;
-  return order.customer_phone || 'Unknown';
+function customerName(order: Order) {
+  const transcript = order.transcript ?? '';
+  const nameMatch =
+    transcript.match(/\\bmy name is\\s+([a-z][a-z\\s'-]{1,40})\\b/i) ??
+    transcript.match(/\\bname is\\s+([a-z][a-z\\s'-]{1,40})\\b/i);
+
+  if (nameMatch?.[1]) return nameMatch[1].trim();
+  return order.customer_phone || 'Unknown customer';
 }
 
 export default function OrdersPage() {
@@ -66,7 +71,7 @@ export default function OrdersPage() {
               <th>Order ID</th>
               <th>Date</th>
               <th>Time</th>
-              <th>Name</th>
+              <th>Customer</th>
               <th>Amount</th>
               <th>Order Type</th>
               <th>Status</th>
@@ -87,7 +92,7 @@ export default function OrdersPage() {
                 </td>
                 <td>{formatDate(o.created_at)}</td>
                 <td>{formatTime(o.created_at)}</td>
-                <td>{orderName(o)}</td>
+                <td>{customerName(o)}</td>
                 <td>${Number(o.total_price).toFixed(2)}</td>
                 <td>Pickup</td>
                 <td>

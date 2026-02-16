@@ -32,6 +32,16 @@ function formatTime(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function customerName(order: Order) {
+  const transcript = order.transcript ?? '';
+  const nameMatch =
+    transcript.match(/\\bmy name is\\s+([a-z][a-z\\s'-]{1,40})\\b/i) ??
+    transcript.match(/\\bname is\\s+([a-z][a-z\\s'-]{1,40})\\b/i);
+
+  if (nameMatch?.[1]) return nameMatch[1].trim();
+  return order.customer_phone || 'Unknown customer';
+}
+
 export default function OrderDetailPage({ params }: { params: { id: string } }) {
   const router = useRouter();
   const [order, setOrder] = useState<Order | null>(null);
@@ -76,8 +86,8 @@ export default function OrderDetailPage({ params }: { params: { id: string } }) 
                 <p className="meta-value">{formatTime(order.created_at)}</p>
               </div>
               <div className="meta-item">
-                <p className="meta-label">Name</p>
-                <p className="meta-value">{order.items_json?.[0]?.name ?? order.customer_phone}</p>
+                <p className="meta-label">Customer</p>
+                <p className="meta-value">{customerName(order)}</p>
               </div>
               <div className="meta-item">
                 <p className="meta-label">Amount</p>
