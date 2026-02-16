@@ -1,0 +1,12 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f7fb; color: #1f2937; }
+a { color: inherit; text-decoration: none; }
+.container { max-width: 1080px; margin: 0 auto; padding: 24px; }
+.card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; }
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { border-bottom: 1px solid #eceff3; padding: 10px; text-align: left; font-size: 14px; }
+.nav { display: flex; gap: 12px; margin-bottom: 20px; }
+.input, textarea, button { font: inherit; }
+.input, textarea { width: 100%; border: 1px solid #d1d5db; border-radius: 8px; padding: 10px; }
+button { border: 0; background: #111827; color: #fff; border-radius: 8px; padding: 10px 14px; cursor: pointer; }

@@ -1,0 +1,21 @@
+{
+  "name": "ai-restaurant-calls",
+  "private": true,
+  "packageManager": "npm@11.7.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev -w web",
+    "dev:api": "npm run dev -w api",
+    "dev:ws": "npm run dev -w media-ws",
+    "dev:all": "concurrently -n api,ws,web -c cyan,yellow,green \"npm run dev:api\" \"npm run dev:ws\" \"npm run dev:web\"",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.6.3"
+  }
+}

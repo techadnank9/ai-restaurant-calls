@@ -1,0 +1,65 @@
+# ai-restaurant-calls
+
+TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
+
+## Structure
+- `apps/api`: Express REST API + Twilio webhook + Supabase auth middleware
+- `apps/media-ws`: WebSocket server for Twilio Media Streams (`/media-stream`) + Redis session state
+- `apps/web`: Next.js dashboard (orders, order detail, calls, menu editor) with Supabase Auth
+- `packages/shared`: zod schemas + shared types
+- `packages/supabase`: Supabase browser/server/service clients
+- `infra/supabase/migrations.sql`: schema + RLS policies
+
+## Prereqs
+- Node 20+
+- npm 10+ (or npm 11 recommended)
+- Redis (docker-compose provided)
+- Supabase project
+
+## Setup
+1. Copy envs:
+   - `cp .env.example .env`
+2. Start Redis:
+   - `docker compose up -d redis`
+3. Install dependencies:
+   - `npm install`
+4. Apply SQL in Supabase SQL editor:
+   - `infra/supabase/migrations.sql`
+5. Run apps:
+   - `npm run dev:api`
+   - `npm run dev:ws`
+   - `npm run dev:web`
+   - or all together: `npm run dev:all`
+
+## Twilio webhook
+- Configure voice webhook URL to: `POST {APP_BASE_URL}/twilio/voice`
+- Endpoint returns TwiML that starts media streaming to `{MEDIA_WS_URL}`.
+
+## Deploy media-ws on Render
+1. Push this repo to GitHub.
+2. In Render, create a new Blueprint and select this repo.
+3. Render will read `/render.yaml` and provision:
+   - `ai-restaurant-media-ws` (web service)
+   - `ai-restaurant-redis` (Key Value)
+4. After deploy, copy the media service URL:
+   - `https://<your-render-service>.onrender.com`
+5. Set:
+   - `MEDIA_WS_URL=wss://<your-render-service>.onrender.com/media-stream`
+6. Keep Twilio webhook on your API service:
+   - `POST {APP_BASE_URL}/twilio/voice`
+
+## Minimal test commands
+- Typecheck all packages/apps:
+  - `npm run typecheck`
+- Build all:
+  - `npm run build`
+- Health checks:
+  - `curl http://localhost:8080/health`
+  - `curl http://localhost:8081/health`
+
+## Notes
+- API auth middleware validates bearer JWT with:
+  - `supabase.auth.getUser(jwt)`
+- API body validation uses `zod` from `@arc/shared`.
+- AI structured order output validation schema:
+  - `packages/shared/src/index.ts` (`aiOrderOutputSchema`)

@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ai-restaurant-media-ws
+    runtime: node
+    rootDir: .
+    plan: starter
+    buildCommand: npm install && npm run build -w media-ws
+    startCommand: node apps/media-ws/dist/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: ai-restaurant-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: ai-restaurant-redis
+    plan: starter
+    maxmemoryPolicy: noeviction
