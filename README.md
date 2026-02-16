@@ -21,16 +21,19 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
    - `cp .env.example .env`
 2. Start Redis:
    - `docker compose up -d redis`
-3. Set NVIDIA key in `.env` for voice order conversation:
+3. Set envs in `.env` for voice order conversation:
    - `NVIDIA_API_KEY=...`
    - `NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1`
-   - `NVIDIA_ASR_URL=` (optional override, if your NVIDIA ASR endpoint differs)
    - `NVIDIA_LLM_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5`
-   - `NVIDIA_ASR_MODEL=nvidia/parakeet-1.1b-rnnt-multilingual-asr`
-   - `NVIDIA_ASR_GRPC_SERVER=grpc.nvcf.nvidia.com:443`
-   - `NVIDIA_ASR_FUNCTION_ID=<from NVIDIA Build Parakeet endpoint page>`
+   - `DEEPGRAM_API_KEY=...`
+   - `DEEPGRAM_MODEL=nova-3`
+   - `DEEPGRAM_LANGUAGE=en`
+   - `DEEPGRAM_SMART_FORMAT=true`
+   - `ELEVENLABS_API_KEY=...`
+   - `ELEVENLABS_VOICE_ID=...`
    - `INTERNAL_API_KEY=<shared secret between api and media-ws>`
-   - `TWILIO_SPEECH_GATHER_ENABLED=false` (disables Twilio Gather STT charges)
+   - `REALTIME_DEEPGRAM_ENABLED=true`
+   - `TWILIO_SPEECH_GATHER_ENABLED=true` (fallback path remains available)
 4. Install dependencies:
    - `npm install`
 5. Apply SQL in Supabase SQL editor:
@@ -45,8 +48,9 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
 - Configure voice webhook URL to: `POST {APP_BASE_URL}/twilio/voice`
 - Endpoint returns TwiML that starts media streaming to `{MEDIA_WS_URL}`.
 - Call recording should remain OFF in Twilio Console to avoid recording charges.
-- With `TWILIO_SPEECH_GATHER_ENABLED=false`, media-ws performs silence-based turn chunking, transcribes with Parakeet, and posts turns to `/twilio/realtime-turn`.
-- At call stop, media-ws also posts a full transcript to `/twilio/media-transcript` for final persistence.
+- With `REALTIME_DEEPGRAM_ENABLED=true`, media-ws streams Twilio call audio to Deepgram and posts final transcripts to `/twilio/realtime-turn`.
+- API returns assistant reply text; media-ws synthesizes voice via ElevenLabs and streams audio back to the caller.
+- `/twilio/converse` remains as fallback when realtime media is unavailable.
 
 ## Restaurant Voice Config (menu_json.meta)
 Store brand + greeting + strict behavior in each restaurant's `menu_json.meta`:

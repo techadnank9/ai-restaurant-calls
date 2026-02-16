@@ -101,6 +101,8 @@ type IntentTurn = {
 type MediaTranscriptBody = {
   callSid?: string;
   transcript?: string;
+  is_final?: boolean;
+  segment_id?: string;
 };
 
 function toStringValue(input: unknown) {
@@ -477,7 +479,8 @@ function determineStage(state: CallState): GatherStage {
 
 function parseConfirmation(text: string) {
   const normalized = text.toLowerCase();
-  if (/\b(yes|correct|confirm|right|yep|yeah)\b/.test(normalized)) return 'yes';
+  if (/\b(yes|correct|confirm|right|yep|yeah|sure|ok|okay|sounds good|thats right|that's right)\b/.test(normalized))
+    return 'yes';
   if (/\b(no|wrong|change|not correct|nah)\b/.test(normalized)) return 'no';
   return 'unknown';
 }
@@ -608,7 +611,11 @@ async function processTranscriptTurn(callSid: string, transcript: string) {
   const state = await loadCallState(callSid);
   if (!state) {
     await failCall(callSid, `Missing call state for transcript: ${transcript}`);
-    return { ok: false, status: 404 as const, body: { error: 'call state not found' } };
+    return {
+      ok: false,
+      status: 404 as const,
+      body: { error: 'call state not found', assistant_reply: '', intent: 'unknown', awaiting_confirmation: false, should_end_call: true }
+    };
   }
 
   state.transcriptLines.push(`Customer: ${transcript}`);
@@ -667,7 +674,18 @@ async function processTranscriptTurn(callSid: string, transcript: string) {
   ) {
     await completeOrder(callSid, state);
     await saveCallState(callSid, { ...state, stage: 'COMPLETE', awaitingConfirmation: false });
-    return { ok: true, status: 200 as const, body: { ok: true, saved: true, assistant_reply: assistantReply } };
+    return {
+      ok: true,
+      status: 200 as const,
+      body: {
+        ok: true,
+        saved: true,
+        assistant_reply: assistantReply,
+        intent: 'order',
+        awaiting_confirmation: false,
+        should_end_call: true
+      }
+    };
   }
 
   await supabaseAdmin.from('calls').upsert(
@@ -681,7 +699,18 @@ async function processTranscriptTurn(callSid: string, transcript: string) {
   );
 
   await saveCallState(callSid, state);
-  return { ok: true, status: 200 as const, body: { ok: true, saved: false, assistant_reply: assistantReply } };
+  return {
+    ok: true,
+    status: 200 as const,
+    body: {
+      ok: true,
+      saved: false,
+      assistant_reply: assistantReply,
+      intent: 'order',
+      awaiting_confirmation: state.awaitingConfirmation,
+      should_end_call: false
+    }
+  };
 }
 
 router.post('/voice', async (req, res) => {
@@ -862,7 +891,12 @@ router.post('/converse', async (req, res) => {
       method: 'POST',
       action: retryUrl
     });
-    gatherRetry.say({ voice: ASSISTANT_VOICE }, 'I missed that. Please repeat your order details.');
+    gatherRetry.say(
+      { voice: ASSISTANT_VOICE },
+      state.awaitingConfirmation
+        ? 'I missed that. Please say yes to confirm, or no to change the order.'
+        : 'I missed that. Please repeat your order details.'
+    );
     twiml.say({ voice: ASSISTANT_VOICE }, 'Still no response. Goodbye.');
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
@@ -1079,8 +1113,19 @@ router.post('/realtime-turn', async (req, res) => {
   const body = (req.body ?? {}) as MediaTranscriptBody;
   const callSid = toStringValue(body.callSid);
   const transcript = toStringValue(body.transcript);
+  const isFinal = Boolean(body.is_final);
   if (!callSid || !transcript) {
     return res.status(400).json({ error: 'callSid and transcript are required' });
+  }
+  if (!isFinal) {
+    return res.json({
+      ok: true,
+      saved: false,
+      assistant_reply: '',
+      intent: 'unknown',
+      awaiting_confirmation: false,
+      should_end_call: false
+    });
   }
 
   const result = await processTranscriptTurn(callSid, transcript);

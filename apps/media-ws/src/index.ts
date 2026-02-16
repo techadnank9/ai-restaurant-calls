@@ -1,32 +1,32 @@
 import dotenv from 'dotenv';
 import express from 'express';
-import grpc from '@grpc/grpc-js';
-import protoLoader from '@grpc/proto-loader';
 import { createServer } from 'http';
 import { Redis } from 'ioredis';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { WebSocketServer } from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 
 dotenv.config({ path: '../../.env' });
 dotenv.config();
 
 const WS_PORT = Number(process.env.PORT ?? process.env.WS_PORT ?? 8081);
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
-const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY ?? '';
-const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL ?? 'https://integrate.api.nvidia.com/v1';
-const NVIDIA_ASR_URL = process.env.NVIDIA_ASR_URL ?? '';
-const NVIDIA_ASR_MODEL =
-  process.env.NVIDIA_ASR_MODEL ?? 'nvidia/parakeet-1.1b-rnnt-multilingual-asr';
-const NVIDIA_ASR_GRPC_SERVER = process.env.NVIDIA_ASR_GRPC_SERVER ?? 'grpc.nvcf.nvidia.com:443';
-const NVIDIA_ASR_FUNCTION_ID = process.env.NVIDIA_ASR_FUNCTION_ID ?? '';
 const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:8080';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? '';
+const REALTIME_DEEPGRAM_ENABLED =
+  (process.env.REALTIME_DEEPGRAM_ENABLED ?? 'true').toLowerCase() === 'true';
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY ?? '';
+const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL ?? 'nova-3';
+const DEEPGRAM_LANGUAGE = process.env.DEEPGRAM_LANGUAGE ?? 'en';
+const DEEPGRAM_SMART_FORMAT =
+  (process.env.DEEPGRAM_SMART_FORMAT ?? 'true').toLowerCase() === 'true';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY ?? '';
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID ?? '';
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID ?? 'eleven_turbo_v2_5';
 
 const redis = new Redis(REDIS_URL);
 redis.on('error', (error) => {
   console.error('redis connection error', error.message);
 });
+
 const app = express();
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
@@ -45,52 +45,33 @@ type SessionState = {
   status: 'active' | 'stopped';
 };
 
-type StreamBuffers = {
+type RealtimeTurnResponse = {
+  assistant_reply?: string;
+  intent?: 'order' | 'reservation' | 'unknown';
+  awaiting_confirmation?: boolean;
+  should_end_call?: boolean;
+};
+
+type LiveSession = {
   callSid: string;
-  fullPcm16: Buffer[];
-  utterancePcm16: Buffer[];
-  silenceFrames: number;
-  voiceFrames: number;
-  processing: Promise<void>;
+  streamSid: string;
+  twilioWs: WebSocket;
+  deepgramWs?: WebSocket;
+  segmentSeq: number;
+  lastFinalTranscript: string;
+  playbackToken: number;
+  ttsPlaying: boolean;
+  ended: boolean;
 };
 
-const streamBuffers = new Map<string, StreamBuffers>();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const rivaProtoPath = path.join(__dirname, '../src/proto/riva_asr.proto');
-const rivaPackageDef = protoLoader.loadSync(rivaProtoPath, {
-  keepCase: true,
-  longs: String,
-  enums: String,
-  defaults: true,
-  oneofs: true
-});
-const rivaGrpcDef = grpc.loadPackageDefinition(rivaPackageDef) as unknown as {
-  nvidia: {
-    riva: {
-      asr: {
-        RivaSpeechRecognition: new (
-          address: string,
-          credentials: unknown
-        ) => {
-          Recognize: (
-            request: Record<string, unknown>,
-            metadata: unknown,
-            callback: (error: Error | null, response: Record<string, unknown>) => void
-          ) => void;
-        };
-      };
-    };
-  };
-};
-const rivaClient = new rivaGrpcDef.nvidia.riva.asr.RivaSpeechRecognition(
-  NVIDIA_ASR_GRPC_SERVER,
-  grpc.credentials.createSsl()
-);
+const sessions = new Map<string, LiveSession>();
 
 async function saveSession(callSid: string, state: SessionState) {
   await redis.set(`call:${callSid}`, JSON.stringify(state), 'EX', 60 * 60 * 2);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function mulawToPcm16Sample(muLawByte: number) {
@@ -104,189 +85,194 @@ function mulawToPcm16Sample(muLawByte: number) {
   return Math.max(-32768, Math.min(32767, pcm));
 }
 
-function decodeMulawPayloadToPcm(payloadB64: string) {
+function rmsFromMulawPayload(payloadB64: string) {
   const muLaw = Buffer.from(payloadB64, 'base64');
-  const pcm = Buffer.alloc(muLaw.length * 2);
-  for (let i = 0; i < muLaw.length; i += 1) {
-    pcm.writeInt16LE(mulawToPcm16Sample(muLaw[i]), i * 2);
-  }
-  return pcm;
-}
-
-function frameRms(chunk: Buffer) {
-  const samples = chunk.length / 2;
-  if (!samples) return 0;
+  if (!muLaw.length) return 0;
   let sumSquares = 0;
-  for (let i = 0; i < chunk.length; i += 2) {
-    const s = chunk.readInt16LE(i);
+  for (let i = 0; i < muLaw.length; i += 1) {
+    const s = mulawToPcm16Sample(muLaw[i]);
     sumSquares += s * s;
   }
-  return Math.sqrt(sumSquares / samples);
+  return Math.sqrt(sumSquares / muLaw.length);
 }
 
-function pcmToWav(pcm16: Buffer, sampleRate = 8000) {
-  const channels = 1;
-  const bitsPerSample = 16;
-  const byteRate = (sampleRate * channels * bitsPerSample) / 8;
-  const blockAlign = (channels * bitsPerSample) / 8;
-  const dataSize = pcm16.length;
-  const chunkSize = 36 + dataSize;
-
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0);
-  header.writeUInt32LE(chunkSize, 4);
-  header.write('WAVE', 8);
-  header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(channels, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(bitsPerSample, 34);
-  header.write('data', 36);
-  header.writeUInt32LE(dataSize, 40);
-
-  return Buffer.concat([header, pcm16]);
+function buildDeepgramUrl() {
+  const url = new URL('wss://api.deepgram.com/v1/listen');
+  url.searchParams.set('encoding', 'mulaw');
+  url.searchParams.set('sample_rate', '8000');
+  url.searchParams.set('channels', '1');
+  url.searchParams.set('model', DEEPGRAM_MODEL);
+  url.searchParams.set('language', DEEPGRAM_LANGUAGE);
+  url.searchParams.set('smart_format', String(DEEPGRAM_SMART_FORMAT));
+  url.searchParams.set('interim_results', 'true');
+  url.searchParams.set('endpointing', '300');
+  url.searchParams.set('punctuate', 'true');
+  return url.toString();
 }
 
-async function transcribeWithParakeet(callSid: string, pcm16Chunks: Buffer[]) {
-  if (!NVIDIA_API_KEY) {
-    console.warn(`[asr][${callSid}] NVIDIA_API_KEY missing; transcription skipped`);
-    return '';
-  }
-
-  const pcm = Buffer.concat(pcm16Chunks);
-  if (pcm.length < 1600) return '';
-
-  const wav = pcmToWav(pcm, 8000);
-
-  if (NVIDIA_ASR_FUNCTION_ID) {
-    const transcript = await new Promise<string>((resolve, reject) => {
-      const metadata = new grpc.Metadata();
-      metadata.set('authorization', `Bearer ${NVIDIA_API_KEY}`);
-      metadata.set('function-id', NVIDIA_ASR_FUNCTION_ID);
-
-      rivaClient.Recognize(
-        {
-          config: {
-            encoding: 'LINEAR_PCM',
-            sample_rate_hertz: 8000,
-            language_code: 'en-US',
-            max_alternatives: 1,
-            enable_automatic_punctuation: true,
-            model: NVIDIA_ASR_MODEL
-          },
-          audio: pcm
-        },
-        metadata,
-        (error, response) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          const results = Array.isArray(response.results) ? response.results : [];
-          const lines = results
-            .map((r) => {
-              const alternatives = Array.isArray((r as Record<string, unknown>).alternatives)
-                ? ((r as Record<string, unknown>).alternatives as Record<string, unknown>[])
-                : [];
-              return String(alternatives[0]?.transcript ?? '').trim();
-            })
-            .filter(Boolean);
-          resolve(lines.join(' ').trim());
-        }
-      );
-    });
-    if (transcript) return transcript;
-  }
-
-  // Fallback path for providers exposing OpenAI-compatible transcription endpoint.
-  const endpoints: string[] = [];
-  if (NVIDIA_ASR_URL) {
-    endpoints.push(NVIDIA_ASR_URL);
-  } else {
-    const trimmed = NVIDIA_BASE_URL.replace(/\/+$/, '');
-    if (trimmed.endsWith('/v1')) {
-      endpoints.push(`${trimmed}/audio/transcriptions`);
-    } else {
-      endpoints.push(`${trimmed}/v1/audio/transcriptions`);
-      endpoints.push(`${trimmed}/audio/transcriptions`);
-    }
-  }
-
-  for (const endpoint of endpoints) {
-    const form = new FormData();
-    form.append('model', NVIDIA_ASR_MODEL);
-    form.append('file', new Blob([wav], { type: 'audio/wav' }), `${callSid}.wav`);
-    form.append('language', 'en');
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${NVIDIA_API_KEY}`
-      },
-      body: form
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      console.error(
-        `[asr][${callSid}] ASR HTTP ${response.status} endpoint=${endpoint} body=${body.slice(0, 240)}`
-      );
-      continue;
-    }
-
-    const json = (await response.json()) as { text?: string };
-    return typeof json.text === 'string' ? json.text.trim() : '';
-  }
-
-  return '';
+function clearTwilioPlayback(session: LiveSession) {
+  if (session.twilioWs.readyState !== WebSocket.OPEN) return;
+  session.twilioWs.send(
+    JSON.stringify({
+      event: 'clear',
+      streamSid: session.streamSid
+    })
+  );
 }
 
-async function postTranscriptToApi(callSid: string, transcript: string) {
-  if (!transcript) return;
+async function callRealtimeTurn(
+  callSid: string,
+  transcript: string,
+  isFinal: boolean,
+  segmentId: string
+): Promise<RealtimeTurnResponse> {
   const endpoint = new URL('/twilio/realtime-turn', APP_BASE_URL).toString();
-  await fetch(endpoint, {
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(INTERNAL_API_KEY ? { 'x-internal-api-key': INTERNAL_API_KEY } : {})
     },
-    body: JSON.stringify({ callSid, transcript })
+    body: JSON.stringify({
+      callSid,
+      transcript,
+      is_final: isFinal,
+      segment_id: segmentId
+    })
   });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`realtime-turn failed ${response.status}: ${body}`);
+  }
+  return (await response.json()) as RealtimeTurnResponse;
 }
 
-async function flushUtterance(callSid: string, force = false) {
-  const buffers = streamBuffers.get(callSid);
-  if (!buffers) return;
-  if (!force && (buffers.voiceFrames < 20 || buffers.utterancePcm16.length === 0)) return;
+async function synthesizeElevenLabs(text: string) {
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return Buffer.alloc(0);
+  const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': ELEVENLABS_API_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      text,
+      model_id: ELEVENLABS_MODEL_ID
+    })
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`elevenlabs failed ${response.status}: ${body}`);
+  }
+  const buf = Buffer.from(await response.arrayBuffer());
+  return buf;
+}
 
-  const utterance = buffers.utterancePcm16;
-  buffers.utterancePcm16 = [];
-  buffers.silenceFrames = 0;
-  buffers.voiceFrames = 0;
+async function playTwilioUlaw(session: LiveSession, audio: Buffer) {
+  if (!audio.length) return;
+  session.playbackToken += 1;
+  const token = session.playbackToken;
+  session.ttsPlaying = true;
 
-  buffers.processing = buffers.processing.then(async () => {
-    try {
-      const transcript = await transcribeWithParakeet(callSid, utterance);
-      if (!transcript) return;
-      await postTranscriptToApi(callSid, transcript);
-      console.log(`[asr][${callSid}] turn_transcript=${transcript}`);
-    } catch (error) {
-      console.error(`[asr][${callSid}] turn transcription error`, error);
+  const frameSize = 160; // 20ms at 8k ulaw mono
+  for (let i = 0; i < audio.length; i += frameSize) {
+    if (session.ended || token !== session.playbackToken) {
+      session.ttsPlaying = false;
+      return;
     }
+    const chunk = audio.subarray(i, Math.min(i + frameSize, audio.length));
+    if (session.twilioWs.readyState !== WebSocket.OPEN) {
+      session.ttsPlaying = false;
+      return;
+    }
+    session.twilioWs.send(
+      JSON.stringify({
+        event: 'media',
+        streamSid: session.streamSid,
+        media: {
+          payload: chunk.toString('base64')
+        }
+      })
+    );
+    await sleep(20);
+  }
+
+  session.ttsPlaying = false;
+}
+
+async function handleFinalTranscript(session: LiveSession, transcript: string) {
+  const normalized = transcript.trim();
+  if (!normalized) return;
+  if (normalized.toLowerCase() === session.lastFinalTranscript.toLowerCase()) return;
+  session.lastFinalTranscript = normalized;
+
+  const segmentId = `${session.callSid}-${++session.segmentSeq}`;
+  console.log(`[deepgram][${session.callSid}] final=${normalized}`);
+
+  try {
+    const turn = await callRealtimeTurn(session.callSid, normalized, true, segmentId);
+    const reply = (turn.assistant_reply ?? '').trim();
+    if (!reply) return;
+    console.log(`[turn][${session.callSid}] reply=${reply}`);
+    const audio = await synthesizeElevenLabs(reply);
+    await playTwilioUlaw(session, audio);
+  } catch (error) {
+    console.error(`[turn][${session.callSid}] realtime handling error`, error);
+  }
+}
+
+function openDeepgramForSession(session: LiveSession) {
+  if (!REALTIME_DEEPGRAM_ENABLED || !DEEPGRAM_API_KEY) return;
+  const dg = new WebSocket(buildDeepgramUrl(), {
+    headers: {
+      Authorization: `Token ${DEEPGRAM_API_KEY}`
+    }
+  });
+  session.deepgramWs = dg;
+
+  dg.on('open', () => {
+    console.log(`[deepgram][${session.callSid}] connected`);
+  });
+
+  dg.on('message', async (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+      const channel = (msg.channel ?? {}) as Record<string, unknown>;
+      const alternatives = Array.isArray(channel.alternatives)
+        ? (channel.alternatives as Record<string, unknown>[])
+        : [];
+      const transcript = String(alternatives[0]?.transcript ?? '').trim();
+      const isFinal = Boolean(msg.is_final || msg.speech_final);
+
+      if (transcript && !isFinal) {
+        console.log(`[deepgram][${session.callSid}] partial=${transcript}`);
+      }
+      if (transcript && isFinal) {
+        await handleFinalTranscript(session, transcript);
+      }
+    } catch (error) {
+      console.error(`[deepgram][${session.callSid}] message parse error`, error);
+    }
+  });
+
+  dg.on('close', () => {
+    console.log(`[deepgram][${session.callSid}] closed`);
+  });
+
+  dg.on('error', (error) => {
+    console.error(`[deepgram][${session.callSid}] error`, error);
   });
 }
 
 wss.on('connection', (ws) => {
   let callSid = '';
+  let streamSid = '';
 
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw.toString()) as {
         event: 'connected' | 'start' | 'media' | 'stop';
-        sequenceNumber?: string;
         start?: {
           accountSid?: string;
           callSid?: string;
@@ -294,19 +280,25 @@ wss.on('connection', (ws) => {
           customParameters?: Record<string, string>;
         };
         media?: { track: string; payload: string };
-        stop?: { accountSid?: string; callSid?: string; streamSid?: string };
+        stop?: { callSid?: string };
       };
 
-      if (msg.event === 'start' && msg.start?.callSid) {
+      if (msg.event === 'start' && msg.start?.callSid && msg.start?.streamSid) {
         callSid = msg.start.callSid;
-        streamBuffers.set(callSid, {
+        streamSid = msg.start.streamSid;
+        const session: LiveSession = {
           callSid,
-          fullPcm16: [],
-          utterancePcm16: [],
-          silenceFrames: 0,
-          voiceFrames: 0,
-          processing: Promise.resolve()
-        });
+          streamSid,
+          twilioWs: ws,
+          segmentSeq: 0,
+          lastFinalTranscript: '',
+          playbackToken: 0,
+          ttsPlaying: false,
+          ended: false
+        };
+        sessions.set(callSid, session);
+        openDeepgramForSession(session);
+
         const state: SessionState = {
           callSid,
           streamSid: msg.start.streamSid,
@@ -320,39 +312,38 @@ wss.on('connection', (ws) => {
         await saveSession(callSid, state);
       }
 
-      if (msg.event === 'media' && callSid) {
-        if (msg.media?.payload) {
-          const pcmChunk = decodeMulawPayloadToPcm(msg.media.payload);
-          const buffers = streamBuffers.get(callSid);
-          if (buffers) {
-            buffers.fullPcm16.push(pcmChunk);
-            const rms = frameRms(pcmChunk);
-            const isVoice = rms > 700;
-            if (isVoice) {
-              buffers.voiceFrames += 1;
-              buffers.silenceFrames = 0;
-              buffers.utterancePcm16.push(pcmChunk);
-            } else if (buffers.voiceFrames > 0) {
-              buffers.silenceFrames += 1;
-              buffers.utterancePcm16.push(pcmChunk);
-              if (buffers.silenceFrames >= 25) {
-                await flushUtterance(callSid);
-              }
-            }
-            if (buffers.voiceFrames > 0 && buffers.utterancePcm16.length >= 500) {
-              await flushUtterance(callSid, true);
-            }
-          }
+      if (msg.event === 'media' && callSid && msg.media?.payload) {
+        const session = sessions.get(callSid);
+        if (session?.ttsPlaying && rmsFromMulawPayload(msg.media.payload) > 700) {
+          session.playbackToken += 1;
+          clearTwilioPlayback(session);
+          session.ttsPlaying = false;
         }
+
+        if (session?.deepgramWs?.readyState === WebSocket.OPEN) {
+          const audio = Buffer.from(msg.media.payload, 'base64');
+          session.deepgramWs.send(audio);
+        }
+
         const rawState = await redis.get(`call:${callSid}`);
-        if (!rawState) return;
-        const state = JSON.parse(rawState) as SessionState;
-        state.mediaFrames += 1;
-        await saveSession(callSid, state);
+        if (rawState) {
+          const state = JSON.parse(rawState) as SessionState;
+          state.mediaFrames += 1;
+          await saveSession(callSid, state);
+        }
       }
 
       if (msg.event === 'stop' && (msg.stop?.callSid || callSid)) {
         const id = msg.stop?.callSid ?? callSid;
+        const session = sessions.get(id);
+        if (session) {
+          session.ended = true;
+          if (session.deepgramWs?.readyState === WebSocket.OPEN) {
+            session.deepgramWs.send(JSON.stringify({ type: 'Finalize' }));
+            session.deepgramWs.close();
+          }
+          sessions.delete(id);
+        }
         const rawState = await redis.get(`call:${id}`);
         if (rawState) {
           const state = JSON.parse(rawState) as SessionState;
@@ -360,37 +351,29 @@ wss.on('connection', (ws) => {
           state.stoppedAt = new Date().toISOString();
           await saveSession(id, state);
         }
-        try {
-          const buffers = streamBuffers.get(id);
-          await flushUtterance(id, true);
-          await buffers?.processing;
-          const transcript = await transcribeWithParakeet(id, buffers?.fullPcm16 ?? []);
-          if (transcript) {
-            const endpoint = new URL('/twilio/media-transcript', APP_BASE_URL).toString();
-            await fetch(endpoint, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...(INTERNAL_API_KEY ? { 'x-internal-api-key': INTERNAL_API_KEY } : {})
-              },
-              body: JSON.stringify({ callSid: id, transcript })
-            });
-            console.log(`[asr][${id}] full_transcript=${transcript}`);
-          } else {
-            console.log(`[asr][${id}] empty transcript`);
-          }
-        } catch (error) {
-          console.error(`[asr][${id}] transcription error`, error);
-        } finally {
-          streamBuffers.delete(id);
-        }
       }
     } catch (error) {
       console.error('media parse error', error);
     }
   });
+
+  ws.on('close', () => {
+    if (!callSid) return;
+    const session = sessions.get(callSid);
+    if (!session) return;
+    session.ended = true;
+    if (session.deepgramWs?.readyState === WebSocket.OPEN) {
+      session.deepgramWs.close();
+    }
+    sessions.delete(callSid);
+  });
 });
 
 server.listen(WS_PORT, () => {
   console.log(`media-ws listening on :${WS_PORT}`);
+  console.log(
+    `[config] REALTIME_DEEPGRAM_ENABLED=${REALTIME_DEEPGRAM_ENABLED} DEEPGRAM_MODEL=${DEEPGRAM_MODEL} ELEVENLABS_VOICE_CONFIGURED=${Boolean(
+      ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID
+    )}`
+  );
 });
