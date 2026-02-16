@@ -9,6 +9,11 @@ const router = Router();
 const DEFAULT_MEDIA_WS_URL = 'ws://localhost:8081/media-stream';
 const MAX_TURNS = 6;
 const STATE_TTL_SECONDS = 60 * 30;
+const RETRY_LINES = [
+  'Sorry, the line was noisy. Please repeat your order.',
+  'I missed that. Please say the item and quantity again.',
+  'Sorry, I could not hear that clearly. Please repeat one more time.'
+];
 
 const openai = env.LLM_API_KEY
   ? new OpenAI({
@@ -81,6 +86,11 @@ type OrderTurn = {
   assistant_reply: string;
   next_question: string | null;
   order_type: 'pickup';
+};
+
+type MediaTranscriptBody = {
+  callSid?: string;
+  transcript?: string;
 };
 
 function toStringValue(input: unknown) {
@@ -251,6 +261,25 @@ function fallbackTurn(assistantReply = 'Please share your order items, your name
   };
 }
 
+function sanitizeSpeechReply(reply: string) {
+  const trimmed = reply.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return 'Please share your order items, your name, and your pickup time.';
+  return trimmed.slice(0, 260);
+}
+
+function friendlyConfirmReply(state: CallState) {
+  const summary = summarizeItems(state.items);
+  return `Got it. I have ${summary} for pickup at ${state.pickupTime}. The name is ${
+    state.customerName
+  }. Is everything correct? Please say yes or no.`;
+}
+
+function confirmationClosing(name: string | null, pickupTime: string | null) {
+  const callerName = name?.trim() ? name.trim() : 'there';
+  const pickup = pickupTime?.trim() ? pickupTime.trim() : 'the requested time';
+  return `Perfect, ${callerName}. Your pickup order is confirmed for ${pickup}. Thank you for calling.`;
+}
+
 async function runOrderTurn(
   callSid: string,
   callState: CallState,
@@ -285,7 +314,7 @@ async function runOrderTurn(
         {
           role: 'system',
           content:
-            'You are a restaurant phone ordering agent. Use only menu items provided in AVAILABLE_MENU. Collect customer_name, pickup_time, and item quantities. If unknown item is requested, add it to unknown_items and ask customer to choose from menu. Keep response concise and conversational. Mark is_order_complete true only when customer_name, at least one valid item, and pickup_time are present.'
+            'You are a warm, natural restaurant phone ordering agent. Use only menu items from AVAILABLE_MENU and never invent items. Keep each response to 1-2 short sentences, with friendly spoken phrasing. Ask exactly one question at a time. Collect customer_name, pickup_time, and item quantities. If an unknown item is requested, add it to unknown_items and politely ask for a valid menu item. Mark is_order_complete true only when customer_name, at least one valid item, and pickup_time are present.'
         },
         {
           role: 'user',
@@ -429,6 +458,113 @@ async function failCall(callSid: string, message: string) {
   );
 }
 
+async function completeOrder(callSid: string, state: CallState) {
+  const totalPrice = state.items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
+  const transcript = state.transcriptLines.join('\n');
+
+  await supabaseAdmin.from('orders').insert({
+    restaurant_id: state.restaurantId,
+    customer_name: state.customerName ?? 'Unknown',
+    customer_phone: state.customerPhone || 'unknown',
+    items_json: state.items,
+    total_price: totalPrice,
+    pickup_time: state.pickupTime ?? 'as soon as possible',
+    status: 'pending',
+    transcript,
+    ai_confidence: 0.9
+  });
+
+  await supabaseAdmin.from('calls').upsert(
+    {
+      twilio_call_sid: callSid,
+      restaurant_id: state.restaurantId,
+      transcript,
+      status: 'completed'
+    },
+    { onConflict: 'twilio_call_sid' }
+  );
+}
+
+async function processTranscriptTurn(callSid: string, transcript: string) {
+  const state = await loadCallState(callSid);
+  if (!state) {
+    await failCall(callSid, `Missing call state for transcript: ${transcript}`);
+    return { ok: false, status: 404 as const, body: { error: 'call state not found' } };
+  }
+
+  state.transcriptLines.push(`Customer: ${transcript}`);
+  const llmTurn = await runOrderTurn(callSid, state, transcript, state.menuItems);
+
+  if (llmTurn.customer_name) state.customerName = llmTurn.customer_name;
+  if (llmTurn.pickup_time) state.pickupTime = llmTurn.pickup_time;
+
+  const validatedItems: ValidatedOrderItem[] = [];
+  const unknown: string[] = [];
+  for (const item of llmTurn.items) {
+    const matched = findMenuMatch(item.name, state.menuItems);
+    if (!matched && state.strictMenuValidation) {
+      unknown.push(item.name);
+      continue;
+    }
+    if (matched) {
+      validatedItems.push({
+        name: matched.name,
+        quantity: Math.max(1, Number(item.quantity || 1)),
+        unit_price: matched.basePrice,
+        options: item.options ?? []
+      });
+    }
+  }
+
+  for (const u of llmTurn.unknown_items) {
+    if (u && !unknown.includes(u)) unknown.push(u);
+  }
+
+  if (validatedItems.length > 0) state.items = validatedItems;
+  state.unknownItems = unknown;
+  state.stage = determineStage(state);
+
+  let assistantReply = sanitizeSpeechReply(llmTurn.assistant_reply);
+  if (unknown.length > 0) {
+    const examples = state.menuItems.slice(0, 5).map((i) => i.name).join(', ');
+    assistantReply = `Sorry, I could not find ${unknown.join(
+      ', '
+    )} on our menu. You can choose items like ${examples}. What would you like instead?`;
+    state.stage = 'COLLECT_ITEMS';
+  } else if (state.stage === 'COMPLETE') {
+    assistantReply = friendlyConfirmReply(state);
+    state.awaitingConfirmation = true;
+    state.stage = 'CONFIRM_ORDER';
+  }
+
+  state.transcriptLines.push(`Assistant: ${assistantReply}`);
+
+  if (
+    llmTurn.is_order_complete &&
+    !unknown.length &&
+    state.items.length > 0 &&
+    state.customerName &&
+    state.pickupTime
+  ) {
+    await completeOrder(callSid, state);
+    await saveCallState(callSid, { ...state, stage: 'COMPLETE', awaitingConfirmation: false });
+    return { ok: true, status: 200 as const, body: { ok: true, saved: true, assistant_reply: assistantReply } };
+  }
+
+  await supabaseAdmin.from('calls').upsert(
+    {
+      twilio_call_sid: callSid,
+      restaurant_id: state.restaurantId,
+      transcript: state.transcriptLines.join('\n'),
+      status: 'in_progress'
+    },
+    { onConflict: 'twilio_call_sid' }
+  );
+
+  await saveCallState(callSid, state);
+  return { ok: true, status: 200 as const, body: { ok: true, saved: false, assistant_reply: assistantReply } };
+}
+
 router.post('/voice', async (req, res) => {
   const called = normalizePhone(req.body?.Called ?? req.body?.To);
   const from = normalizePhone(req.body?.From);
@@ -494,6 +630,17 @@ router.post('/voice', async (req, res) => {
     from,
     turn: '1'
   });
+
+  if (!env.TWILIO_SPEECH_GATHER_ENABLED) {
+    response.say(
+      { voice: 'alice' },
+      `${voiceConfig.greetingText} Please say your full pickup order, your name, and your pickup time after the tone.`
+    );
+    response.pause({ length: 300 });
+    response.say({ voice: 'alice' }, 'We could not complete your order. Please call again.');
+    response.hangup();
+    return res.type('text/xml').send(response.toString());
+  }
 
   const gather = response.gather({
     input: ['speech'],
@@ -595,39 +742,13 @@ router.post('/converse', async (req, res) => {
     const confirmed = parseConfirmation(spoken);
 
     if (confirmed === 'yes') {
-      const totalPrice = state.items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
-      const transcript = state.transcriptLines.join('\n');
-
-      await supabaseAdmin.from('orders').insert({
-        restaurant_id: state.restaurantId,
-        customer_name: state.customerName ?? 'Unknown',
-        customer_phone: state.customerPhone || 'unknown',
-        items_json: state.items,
-        total_price: totalPrice,
-        pickup_time: state.pickupTime ?? 'as soon as possible',
-        status: 'pending',
-        transcript,
-        ai_confidence: 0.9
-      });
-
-      await supabaseAdmin.from('calls').upsert(
-        {
-          twilio_call_sid: callSid,
-          restaurant_id: state.restaurantId,
-          transcript,
-          status: 'completed'
-        },
-        { onConflict: 'twilio_call_sid' }
-      );
+      await completeOrder(callSid, state);
 
       state.stage = 'COMPLETE';
       state.awaitingConfirmation = false;
       await saveCallState(callSid, state);
 
-      twiml.say(
-        { voice: 'alice' },
-        `Thank you ${state.customerName ?? ''}. Your pickup order is confirmed for ${state.pickupTime}. Goodbye.`
-      );
+      twiml.say({ voice: 'alice' }, confirmationClosing(state.customerName, state.pickupTime));
       twiml.hangup();
       return res.type('text/xml').send(twiml.toString());
     }
@@ -670,15 +791,16 @@ router.post('/converse', async (req, res) => {
 
   state.stage = determineStage(state);
 
-  let assistantReply = llmTurn.assistant_reply;
+  let assistantReply = sanitizeSpeechReply(llmTurn.assistant_reply);
 
   if (unknown.length > 0) {
     const examples = state.menuItems.slice(0, 5).map((i) => i.name).join(', ');
-    assistantReply = `I could not find ${unknown.join(', ')} on our menu. Please choose from available items like ${examples}.`;
+    assistantReply = `Sorry, I could not find ${unknown.join(
+      ', '
+    )} on our menu. You can choose items like ${examples}. What would you like instead?`;
     state.stage = 'COLLECT_ITEMS';
   } else if (state.stage === 'COMPLETE') {
-    const summary = summarizeItems(state.items);
-    assistantReply = `Please confirm: Name ${state.customerName}, order ${summary}, pickup ${state.pickupTime}. Say yes to confirm or no to change.`;
+    assistantReply = friendlyConfirmReply(state);
     state.awaitingConfirmation = true;
     state.stage = 'CONFIRM_ORDER';
   }
@@ -702,7 +824,7 @@ router.post('/converse', async (req, res) => {
 
   if (state.turnCount >= MAX_TURNS && !state.awaitingConfirmation) {
     await failCall(callSid, state.transcriptLines.join('\n'));
-    twiml.say('I could not complete your order details. Please call again. Goodbye.');
+    twiml.say({ voice: 'alice' }, 'I could not complete your order details right now. Please call again. Goodbye.');
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
   }
@@ -724,30 +846,45 @@ router.post('/converse', async (req, res) => {
   });
   gather.say({ voice: 'alice' }, assistantReply);
 
-  twiml.say('Sorry, I did not get that. Please call again.');
+  const retryLine = RETRY_LINES[(state.turnCount - 1) % RETRY_LINES.length];
+  twiml.say({ voice: 'alice' }, retryLine);
   twiml.hangup();
   return res.type('text/xml').send(twiml.toString());
 });
 
-router.post('/recording-complete', async (req, res) => {
-  const callSid = toStringValue(req.body?.CallSid);
-  const recordingUrl = toStringValue(req.body?.RecordingUrl);
-
-  if (callSid) {
-    await supabaseAdmin.from('calls').upsert(
-      {
-        twilio_call_sid: callSid,
-        recording_url: recordingUrl,
-        status: 'completed'
-      },
-      { onConflict: 'twilio_call_sid' }
-    );
+router.post('/media-transcript', async (req, res) => {
+  const internalKey = req.get('x-internal-api-key') ?? '';
+  if (env.INTERNAL_API_KEY && internalKey !== env.INTERNAL_API_KEY) {
+    return res.status(401).json({ error: 'unauthorized internal request' });
   }
 
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say('Thank you. Your order is being processed. Goodbye.');
-  twiml.hangup();
-  res.type('text/xml').send(twiml.toString());
+  const body = (req.body ?? {}) as MediaTranscriptBody;
+  const callSid = toStringValue(body.callSid);
+  const transcript = toStringValue(body.transcript);
+
+  if (!callSid || !transcript) {
+    return res.status(400).json({ error: 'callSid and transcript are required' });
+  }
+
+  const result = await processTranscriptTurn(callSid, transcript);
+  return res.status(result.status).json(result.body);
+});
+
+router.post('/realtime-turn', async (req, res) => {
+  const internalKey = req.get('x-internal-api-key') ?? '';
+  if (env.INTERNAL_API_KEY && internalKey !== env.INTERNAL_API_KEY) {
+    return res.status(401).json({ error: 'unauthorized internal request' });
+  }
+
+  const body = (req.body ?? {}) as MediaTranscriptBody;
+  const callSid = toStringValue(body.callSid);
+  const transcript = toStringValue(body.transcript);
+  if (!callSid || !transcript) {
+    return res.status(400).json({ error: 'callSid and transcript are required' });
+  }
+
+  const result = await processTranscriptTurn(callSid, transcript);
+  return res.status(result.status).json(result.body);
 });
 
 export default router;

@@ -22,6 +22,6 @@ app.listen(env.PORT, () => {
   console.log(
     `[config] LLM_ENABLED=${Boolean(env.LLM_API_KEY)} LLM_MODEL=${env.LLM_MODEL} LLM_BASE_URL=${
       env.LLM_BASE_URL || 'default'
-    }`
+    } TWILIO_SPEECH_GATHER_ENABLED=${env.TWILIO_SPEECH_GATHER_ENABLED}`
   );
 });

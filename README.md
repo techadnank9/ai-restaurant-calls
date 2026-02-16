@@ -25,6 +25,9 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
    - `NVIDIA_API_KEY=...`
    - `NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1`
    - `NVIDIA_LLM_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5`
+   - `NVIDIA_ASR_MODEL=nvidia/parakeet-1.1b-rnnt-multilingual-asr`
+   - `INTERNAL_API_KEY=<shared secret between api and media-ws>`
+   - `TWILIO_SPEECH_GATHER_ENABLED=false` (disables Twilio Gather STT charges)
 4. Install dependencies:
    - `npm install`
 5. Apply SQL in Supabase SQL editor:
@@ -38,6 +41,9 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
 ## Twilio webhook
 - Configure voice webhook URL to: `POST {APP_BASE_URL}/twilio/voice`
 - Endpoint returns TwiML that starts media streaming to `{MEDIA_WS_URL}`.
+- Call recording should remain OFF in Twilio Console to avoid recording charges.
+- With `TWILIO_SPEECH_GATHER_ENABLED=false`, media-ws performs silence-based turn chunking, transcribes with Parakeet, and posts turns to `/twilio/realtime-turn`.
+- At call stop, media-ws also posts a full transcript to `/twilio/media-transcript` for final persistence.
 
 ## Restaurant Voice Config (menu_json.meta)
 Store brand + greeting + strict behavior in each restaurant's `menu_json.meta`:
