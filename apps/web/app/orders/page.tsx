@@ -6,6 +6,12 @@ import { useRouter } from 'next/navigation';
 import { Nav } from '../../components/Nav';
 import { apiFetch } from '../../lib/api';
 
+type OrderItem = {
+  name?: string;
+  quantity?: number;
+  unit_price?: number;
+};
+
 type Order = {
   id: string;
   customer_phone: string;
@@ -13,7 +19,22 @@ type Order = {
   pickup_time: string;
   status: string;
   created_at: string;
+  items_json?: OrderItem[] | null;
 };
+
+function formatDate(value: string) {
+  return new Date(value).toLocaleDateString();
+}
+
+function formatTime(value: string) {
+  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function orderName(order: Order) {
+  const firstItem = Array.isArray(order.items_json) ? order.items_json[0] : undefined;
+  if (firstItem?.name) return firstItem.name;
+  return order.customer_phone || 'Unknown';
+}
 
 export default function OrdersPage() {
   const router = useRouter();
@@ -42,25 +63,36 @@ export default function OrdersPage() {
         <table className="table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Phone</th>
-              <th>Total</th>
-              <th>Pickup</th>
+              <th>Order ID</th>
+              <th>Date</th>
+              <th>Time</th>
+              <th>Name</th>
+              <th>Amount</th>
+              <th>Order Type</th>
               <th>Status</th>
-              <th>Created</th>
             </tr>
           </thead>
           <tbody>
+            {orders.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="muted">
+                  No orders yet.
+                </td>
+              </tr>
+            ) : null}
             {orders.map((o) => (
               <tr key={o.id}>
                 <td>
                   <Link href={`/orders/${o.id}`}>{o.id.slice(0, 8)}</Link>
                 </td>
-                <td>{o.customer_phone}</td>
+                <td>{formatDate(o.created_at)}</td>
+                <td>{formatTime(o.created_at)}</td>
+                <td>{orderName(o)}</td>
                 <td>${Number(o.total_price).toFixed(2)}</td>
-                <td>{o.pickup_time}</td>
-                <td>{o.status}</td>
-                <td>{new Date(o.created_at).toLocaleString()}</td>
+                <td>Pickup</td>
+                <td>
+                  <span className="badge">{o.status}</span>
+                </td>
               </tr>
             ))}
           </tbody>
