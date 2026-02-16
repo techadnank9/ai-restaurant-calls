@@ -232,7 +232,7 @@ function sanitizeTurn(value: unknown): OrderTurn {
   };
 }
 
-function fallbackTurn(): OrderTurn {
+function fallbackTurn(assistantReply = 'Please share your order items, your name, and your pickup time.'): OrderTurn {
   return {
     customer_name: null,
     pickup_time: null,
@@ -240,7 +240,7 @@ function fallbackTurn(): OrderTurn {
     unknown_items: [],
     estimated_total: 0,
     is_order_complete: false,
-    assistant_reply: 'Please share your order items, your name, and your pickup time.',
+    assistant_reply: assistantReply,
     next_question: null,
     order_type: 'pickup'
   };
@@ -254,7 +254,9 @@ async function runOrderTurn(
 ): Promise<OrderTurn> {
   if (!openai) {
     console.warn(`[gpt][${callSid}] OPENAI disabled, using fallback turn`);
-    return fallbackTurn();
+    return fallbackTurn(
+      'Our AI ordering is temporarily unavailable. Please hold for staff or call again in a few minutes.'
+    );
   }
 
   try {
@@ -353,7 +355,26 @@ async function runOrderTurn(
     console.log(`[gpt][${callSid}] parsed_turn=${JSON.stringify(parsed)}`);
     return parsed;
   } catch (error) {
-    console.error(`[gpt][${callSid}] error`, error);
+    const maybeError = error as {
+      code?: string;
+      type?: string;
+      status?: number;
+      message?: string;
+    };
+    console.error(
+      `[gpt][${callSid}] error status=${maybeError?.status ?? 'unknown'} code=${
+        maybeError?.code ?? 'unknown'
+      } type=${maybeError?.type ?? 'unknown'} message=${maybeError?.message ?? 'unknown'}`
+    );
+    if (
+      maybeError?.status === 429 ||
+      maybeError?.code === 'insufficient_quota' ||
+      maybeError?.type === 'insufficient_quota'
+    ) {
+      return fallbackTurn(
+        'Our AI ordering is temporarily unavailable right now. Please hold for staff or call back shortly.'
+      );
+    }
     return fallbackTurn();
   }
 }
