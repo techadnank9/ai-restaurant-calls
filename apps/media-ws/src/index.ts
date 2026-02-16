@@ -1,7 +1,11 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import grpc from '@grpc/grpc-js';
+import protoLoader from '@grpc/proto-loader';
 import { createServer } from 'http';
 import { Redis } from 'ioredis';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 
 dotenv.config({ path: '../../.env' });
@@ -14,6 +18,8 @@ const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL ?? 'https://integrate.api.nv
 const NVIDIA_ASR_URL = process.env.NVIDIA_ASR_URL ?? '';
 const NVIDIA_ASR_MODEL =
   process.env.NVIDIA_ASR_MODEL ?? 'nvidia/parakeet-1.1b-rnnt-multilingual-asr';
+const NVIDIA_ASR_GRPC_SERVER = process.env.NVIDIA_ASR_GRPC_SERVER ?? 'grpc.nvcf.nvidia.com:443';
+const NVIDIA_ASR_FUNCTION_ID = process.env.NVIDIA_ASR_FUNCTION_ID ?? '';
 const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:8080';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? '';
 
@@ -49,6 +55,39 @@ type StreamBuffers = {
 };
 
 const streamBuffers = new Map<string, StreamBuffers>();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rivaProtoPath = path.join(__dirname, '../src/proto/riva_asr.proto');
+const rivaPackageDef = protoLoader.loadSync(rivaProtoPath, {
+  keepCase: true,
+  longs: String,
+  enums: String,
+  defaults: true,
+  oneofs: true
+});
+const rivaGrpcDef = grpc.loadPackageDefinition(rivaPackageDef) as unknown as {
+  nvidia: {
+    riva: {
+      asr: {
+        RivaSpeechRecognition: new (
+          address: string,
+          credentials: unknown
+        ) => {
+          Recognize: (
+            request: Record<string, unknown>,
+            metadata: unknown,
+            callback: (error: Error | null, response: Record<string, unknown>) => void
+          ) => void;
+        };
+      };
+    };
+  };
+};
+const rivaClient = new rivaGrpcDef.nvidia.riva.asr.RivaSpeechRecognition(
+  NVIDIA_ASR_GRPC_SERVER,
+  grpc.credentials.createSsl()
+);
 
 async function saveSession(callSid: string, state: SessionState) {
   await redis.set(`call:${callSid}`, JSON.stringify(state), 'EX', 60 * 60 * 2);
@@ -121,6 +160,48 @@ async function transcribeWithParakeet(callSid: string, pcm16Chunks: Buffer[]) {
   if (pcm.length < 1600) return '';
 
   const wav = pcmToWav(pcm, 8000);
+
+  if (NVIDIA_ASR_FUNCTION_ID) {
+    const transcript = await new Promise<string>((resolve, reject) => {
+      const metadata = new grpc.Metadata();
+      metadata.set('authorization', `Bearer ${NVIDIA_API_KEY}`);
+      metadata.set('function-id', NVIDIA_ASR_FUNCTION_ID);
+
+      rivaClient.Recognize(
+        {
+          config: {
+            encoding: 'LINEAR_PCM',
+            sample_rate_hertz: 8000,
+            language_code: 'en-US',
+            max_alternatives: 1,
+            enable_automatic_punctuation: true,
+            model: NVIDIA_ASR_MODEL
+          },
+          audio: pcm
+        },
+        metadata,
+        (error, response) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          const results = Array.isArray(response.results) ? response.results : [];
+          const lines = results
+            .map((r) => {
+              const alternatives = Array.isArray((r as Record<string, unknown>).alternatives)
+                ? ((r as Record<string, unknown>).alternatives as Record<string, unknown>[])
+                : [];
+              return String(alternatives[0]?.transcript ?? '').trim();
+            })
+            .filter(Boolean);
+          resolve(lines.join(' ').trim());
+        }
+      );
+    });
+    if (transcript) return transcript;
+  }
+
+  // Fallback path for providers exposing OpenAI-compatible transcription endpoint.
   const endpoints: string[] = [];
   if (NVIDIA_ASR_URL) {
     endpoints.push(NVIDIA_ASR_URL);

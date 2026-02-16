@@ -27,6 +27,8 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
    - `NVIDIA_ASR_URL=` (optional override, if your NVIDIA ASR endpoint differs)
    - `NVIDIA_LLM_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5`
    - `NVIDIA_ASR_MODEL=nvidia/parakeet-1.1b-rnnt-multilingual-asr`
+   - `NVIDIA_ASR_GRPC_SERVER=grpc.nvcf.nvidia.com:443`
+   - `NVIDIA_ASR_FUNCTION_ID=<from NVIDIA Build Parakeet endpoint page>`
    - `INTERNAL_API_KEY=<shared secret between api and media-ws>`
    - `TWILIO_SPEECH_GATHER_ENABLED=false` (disables Twilio Gather STT charges)
 4. Install dependencies:
