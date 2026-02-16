@@ -21,11 +21,14 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
    - `cp .env.example .env`
 2. Start Redis:
    - `docker compose up -d redis`
-3. Install dependencies:
+3. Set OpenAI key in `.env` for voice order conversation:
+   - `OPENAI_API_KEY=...`
+   - `OPENAI_MODEL=gpt-4o-mini`
+4. Install dependencies:
    - `npm install`
-4. Apply SQL in Supabase SQL editor:
+5. Apply SQL in Supabase SQL editor:
    - `infra/supabase/migrations.sql`
-5. Run apps:
+6. Run apps:
    - `npm run dev:api`
    - `npm run dev:ws`
    - `npm run dev:web`
