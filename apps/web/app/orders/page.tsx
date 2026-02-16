@@ -34,11 +34,11 @@ function formatTime(value: string) {
 function customerName(order: Order) {
   const transcript = order.transcript ?? '';
   const nameMatch =
-    transcript.match(/\\bmy name is\\s+([a-z][a-z\\s'-]{1,40})\\b/i) ??
-    transcript.match(/\\bname is\\s+([a-z][a-z\\s'-]{1,40})\\b/i);
+    transcript.match(/\bmy name is\s+([a-z][a-z\s'-]{1,40})\b/i) ??
+    transcript.match(/\bname is\s+([a-z][a-z\s'-]{1,40})\b/i);
 
   if (nameMatch?.[1]) return nameMatch[1].trim();
-  return order.customer_phone || 'Unknown customer';
+  return 'Unknown';
 }
 
 export default function OrdersPage() {
@@ -71,32 +71,38 @@ export default function OrdersPage() {
               <th>Order ID</th>
               <th>Date</th>
               <th>Time</th>
-              <th>Customer</th>
+              <th>Customer Name</th>
+              <th>Phone</th>
               <th>Amount</th>
               <th>Order Type</th>
               <th>Status</th>
+              <th>Details</th>
             </tr>
           </thead>
           <tbody>
             {orders.length === 0 ? (
               <tr>
-                <td colSpan={7} className="muted">
+                <td colSpan={9} className="muted">
                   No orders yet.
                 </td>
               </tr>
             ) : null}
             {orders.map((o) => (
               <tr key={o.id}>
-                <td>
-                  <Link href={`/orders/${o.id}`}>{o.id.slice(0, 8)}</Link>
-                </td>
+                <td className="mono">{o.id.slice(0, 8)}</td>
                 <td>{formatDate(o.created_at)}</td>
                 <td>{formatTime(o.created_at)}</td>
                 <td>{customerName(o)}</td>
+                <td>{o.customer_phone || '-'}</td>
                 <td>${Number(o.total_price).toFixed(2)}</td>
                 <td>Pickup</td>
                 <td>
                   <span className="badge">{o.status}</span>
+                </td>
+                <td>
+                  <Link className="link-btn" href={`/orders/${o.id}`}>
+                    View
+                  </Link>
                 </td>
               </tr>
             ))}

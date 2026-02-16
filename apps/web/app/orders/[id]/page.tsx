@@ -35,11 +35,11 @@ function formatTime(value: string) {
 function customerName(order: Order) {
   const transcript = order.transcript ?? '';
   const nameMatch =
-    transcript.match(/\\bmy name is\\s+([a-z][a-z\\s'-]{1,40})\\b/i) ??
-    transcript.match(/\\bname is\\s+([a-z][a-z\\s'-]{1,40})\\b/i);
+    transcript.match(/\bmy name is\s+([a-z][a-z\s'-]{1,40})\b/i) ??
+    transcript.match(/\bname is\s+([a-z][a-z\s'-]{1,40})\b/i);
 
   if (nameMatch?.[1]) return nameMatch[1].trim();
-  return order.customer_phone || 'Unknown customer';
+  return 'Unknown';
 }
 
 export default function OrderDetailPage({ params }: { params: { id: string } }) {
@@ -88,6 +88,10 @@ export default function OrderDetailPage({ params }: { params: { id: string } }) 
               <div className="meta-item">
                 <p className="meta-label">Customer</p>
                 <p className="meta-value">{customerName(order)}</p>
+              </div>
+              <div className="meta-item">
+                <p className="meta-label">Phone</p>
+                <p className="meta-value">{order.customer_phone || '-'}</p>
               </div>
               <div className="meta-item">
                 <p className="meta-label">Amount</p>
