@@ -20,6 +20,8 @@ app.use('/menu', menuRoutes);
 app.listen(env.PORT, () => {
   console.log(`api listening on :${env.PORT}`);
   console.log(
-    `[config] OPENAI_ENABLED=${Boolean(env.OPENAI_API_KEY)} OPENAI_MODEL=${env.OPENAI_MODEL}`
+    `[config] LLM_ENABLED=${Boolean(env.LLM_API_KEY)} LLM_MODEL=${env.LLM_MODEL} LLM_BASE_URL=${
+      env.LLM_BASE_URL || 'default'
+    }`
   );
 });

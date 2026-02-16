@@ -10,7 +10,12 @@ const DEFAULT_MEDIA_WS_URL = 'ws://localhost:8081/media-stream';
 const MAX_TURNS = 6;
 const STATE_TTL_SECONDS = 60 * 30;
 
-const openai = env.OPENAI_API_KEY ? new OpenAI({ apiKey: env.OPENAI_API_KEY }) : null;
+const openai = env.LLM_API_KEY
+  ? new OpenAI({
+      apiKey: env.LLM_API_KEY,
+      ...(env.LLM_BASE_URL ? { baseURL: env.LLM_BASE_URL } : {})
+    })
+  : null;
 const redis = new Redis(env.REDIS_URL);
 redis.on('error', (err: Error) => {
   console.error('api redis error', err.message);
@@ -274,7 +279,7 @@ async function runOrderTurn(
     console.log(`[gpt][${callSid}] prompt=${JSON.stringify(payload)}`);
 
     const completion = await openai.chat.completions.create({
-      model: env.OPENAI_MODEL,
+      model: env.LLM_MODEL,
       temperature: 0.2,
       messages: [
         {

@@ -21,9 +21,10 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
    - `cp .env.example .env`
 2. Start Redis:
    - `docker compose up -d redis`
-3. Set OpenAI key in `.env` for voice order conversation:
-   - `OPENAI_API_KEY=...`
-   - `OPENAI_MODEL=gpt-4o-mini`
+3. Set NVIDIA key in `.env` for voice order conversation:
+   - `NVIDIA_API_KEY=...`
+   - `NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1`
+   - `NVIDIA_LLM_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5`
 4. Install dependencies:
    - `npm install`
 5. Apply SQL in Supabase SQL editor:
@@ -53,7 +54,7 @@ Store brand + greeting + strict behavior in each restaurant's `menu_json.meta`:
 }
 ```
 
-The Twilio + OpenAI flow enforces strict menu matching against `menu_json.categories[].items`.
+The Twilio + LLM flow enforces strict menu matching against `menu_json.categories[].items`.
 
 ## Deploy media-ws on Render
 1. Push this repo to GitHub.
