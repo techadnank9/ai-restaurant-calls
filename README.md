@@ -51,6 +51,18 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
 - API returns assistant reply text; media-ws synthesizes voice via Deepgram TTS and streams audio back to the caller.
 - `/twilio/converse` remains as fallback when realtime media is unavailable.
 
+## Deepgram Agent tool endpoints
+Internal endpoints protected by `x-internal-api-key`:
+- `POST /agent/tools/get_menu`
+- `POST /agent/tools/check_availability`
+- `POST /agent/tools/build_order`
+- `POST /agent/tools/confirm_order`
+- `POST /agent/tools/create_reservation`
+
+Deepgram Agent starter config for New Delhi Restaurant:
+- `infra/deepgram/new-delhi-agent-config.json`
+- Replace `${INTERNAL_API_KEY}` with your real shared secret when creating tools in Deepgram console.
+
 ## Restaurant Voice Config (menu_json.meta)
 Store brand + greeting + strict behavior in each restaurant's `menu_json.meta`:
 

@@ -5,6 +5,7 @@ import twilioRoutes from './routes/twilio.js';
 import orderRoutes from './routes/orders.js';
 import callRoutes from './routes/calls.js';
 import menuRoutes from './routes/menu.js';
+import agentToolsRoutes from './routes/agent-tools.js';
 
 const app = express();
 app.use(cors());
@@ -16,6 +17,7 @@ app.use('/twilio', twilioRoutes);
 app.use('/orders', orderRoutes);
 app.use('/calls', callRoutes);
 app.use('/menu', menuRoutes);
+app.use('/agent/tools', agentToolsRoutes);
 
 app.listen(env.PORT, () => {
   console.log(`api listening on :${env.PORT}`);

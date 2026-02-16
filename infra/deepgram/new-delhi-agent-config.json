@@ -1,0 +1,69 @@
+{
+  "name": "new-delhi-restaurant-agent",
+  "description": "Phone ordering and reservation intake for New Delhi Restaurant using backend tool validation.",
+  "language": "en",
+  "voice": {
+    "provider": "deepgram",
+    "model": "aura-2-thalia-en"
+  },
+  "instructions": "You are the phone assistant for New Delhi Restaurant. Be warm and concise. First ask whether the caller wants to place an order or make a reservation. Never finalize order details from memory; always call backend tools. For menu questions or order items, call get_menu and build_order. Before committing an order, read back all details and only call confirm_order after explicit yes. For reservations, call check_availability then create_reservation after explicit confirmation.",
+  "context": {
+    "restaurant_id": "38909586-e79c-498b-81ae-91755cc0eb7f",
+    "restaurant_name": "New Delhi Restaurant"
+  },
+  "tools": [
+    {
+      "name": "get_menu",
+      "description": "Fetch current menu items.",
+      "method": "POST",
+      "url": "https://ai-restaurant-api.onrender.com/agent/tools/get_menu",
+      "headers": {
+        "Content-Type": "application/json",
+        "x-internal-api-key": "${INTERNAL_API_KEY}"
+      },
+      "body": {
+        "restaurant_id": "${restaurant_id}"
+      }
+    },
+    {
+      "name": "check_availability",
+      "description": "Check reservation availability for date/time/party size.",
+      "method": "POST",
+      "url": "https://ai-restaurant-api.onrender.com/agent/tools/check_availability",
+      "headers": {
+        "Content-Type": "application/json",
+        "x-internal-api-key": "${INTERNAL_API_KEY}"
+      }
+    },
+    {
+      "name": "build_order",
+      "description": "Validate items against menu and build a draft order.",
+      "method": "POST",
+      "url": "https://ai-restaurant-api.onrender.com/agent/tools/build_order",
+      "headers": {
+        "Content-Type": "application/json",
+        "x-internal-api-key": "${INTERNAL_API_KEY}"
+      }
+    },
+    {
+      "name": "confirm_order",
+      "description": "Commit confirmed order into backend database.",
+      "method": "POST",
+      "url": "https://ai-restaurant-api.onrender.com/agent/tools/confirm_order",
+      "headers": {
+        "Content-Type": "application/json",
+        "x-internal-api-key": "${INTERNAL_API_KEY}"
+      }
+    },
+    {
+      "name": "create_reservation",
+      "description": "Create a reservation record after explicit confirmation.",
+      "method": "POST",
+      "url": "https://ai-restaurant-api.onrender.com/agent/tools/create_reservation",
+      "headers": {
+        "Content-Type": "application/json",
+        "x-internal-api-key": "${INTERNAL_API_KEY}"
+      }
+    }
+  ]
+}
