@@ -44,6 +44,7 @@ router.post('/', requireSupabaseAuth, async (req: AuthedRequest, res) => {
     .from('orders')
     .insert({
       restaurant_id: parsed.data.restaurant_id,
+      customer_name: ai.customer_name ?? null,
       customer_phone: ai.customer_phone,
       items_json: ai.items,
       total_price: ai.total,

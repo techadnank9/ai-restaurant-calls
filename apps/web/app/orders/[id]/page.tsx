@@ -15,6 +15,7 @@ type OrderItem = {
 
 type Order = {
   id: string;
+  customer_name?: string | null;
   customer_phone: string;
   total_price: number;
   pickup_time: string;
@@ -33,6 +34,7 @@ function formatTime(value: string) {
 }
 
 function customerName(order: Order) {
+  if (order.customer_name && order.customer_name.trim()) return order.customer_name.trim();
   const transcript = order.transcript ?? '';
   const nameMatch =
     transcript.match(/\bmy name is\s+([a-z][a-z\s'-]{1,40})\b/i) ??

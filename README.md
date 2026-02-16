@@ -38,6 +38,23 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
 - Configure voice webhook URL to: `POST {APP_BASE_URL}/twilio/voice`
 - Endpoint returns TwiML that starts media streaming to `{MEDIA_WS_URL}`.
 
+## Restaurant Voice Config (menu_json.meta)
+Store brand + greeting + strict behavior in each restaurant's `menu_json.meta`:
+
+```json
+{
+  "meta": {
+    "brand_name": "New Delhi Restaurant",
+    "greeting_text": "Thanks for calling New Delhi Restaurant. Please tell me your pickup order.",
+    "strict_menu_validation": true,
+    "order_type_default": "pickup"
+  },
+  "categories": []
+}
+```
+
+The Twilio + OpenAI flow enforces strict menu matching against `menu_json.categories[].items`.
+
 ## Deploy media-ws on Render
 1. Push this repo to GitHub.
 2. In Render, create a new Blueprint and select this repo.

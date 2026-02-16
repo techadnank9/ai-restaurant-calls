@@ -24,6 +24,7 @@ create table if not exists public.restaurant_users (
 create table if not exists public.orders (
   id uuid primary key default gen_random_uuid(),
   restaurant_id uuid not null references public.restaurants(id) on delete cascade,
+  customer_name text,
   customer_phone text not null,
   items_json jsonb not null,
   total_price numeric(10,2) not null,
@@ -44,6 +45,9 @@ create table if not exists public.calls (
   status text not null default 'in_progress' check (status in ('in_progress','completed','failed')),
   created_at timestamptz not null default now()
 );
+
+alter table public.restaurants add column if not exists voice_config jsonb default '{}'::jsonb;
+alter table public.orders add column if not exists customer_name text;
 
 create index if not exists idx_restaurant_users_user on public.restaurant_users(user_id);
 create index if not exists idx_orders_restaurant_created on public.orders(restaurant_id, created_at desc);
