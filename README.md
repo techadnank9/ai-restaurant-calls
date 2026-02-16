@@ -24,6 +24,7 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
 3. Set NVIDIA key in `.env` for voice order conversation:
    - `NVIDIA_API_KEY=...`
    - `NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1`
+   - `NVIDIA_ASR_URL=` (optional override, if your NVIDIA ASR endpoint differs)
    - `NVIDIA_LLM_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5`
    - `NVIDIA_ASR_MODEL=nvidia/parakeet-1.1b-rnnt-multilingual-asr`
    - `INTERNAL_API_KEY=<shared secret between api and media-ws>`

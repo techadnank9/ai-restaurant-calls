@@ -2,8 +2,6 @@ import dotenv from 'dotenv';
 import express from 'express';
 import { createServer } from 'http';
 import { Redis } from 'ioredis';
-import OpenAI from 'openai';
-import { toFile } from 'openai/uploads';
 import { WebSocketServer } from 'ws';
 
 dotenv.config({ path: '../../.env' });
@@ -13,6 +11,7 @@ const WS_PORT = Number(process.env.PORT ?? process.env.WS_PORT ?? 8081);
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY ?? '';
 const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL ?? 'https://integrate.api.nvidia.com/v1';
+const NVIDIA_ASR_URL = process.env.NVIDIA_ASR_URL ?? '';
 const NVIDIA_ASR_MODEL =
   process.env.NVIDIA_ASR_MODEL ?? 'nvidia/parakeet-1.1b-rnnt-multilingual-asr';
 const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:8080';
@@ -27,12 +26,6 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/media-stream' });
-const asrClient = NVIDIA_API_KEY
-  ? new OpenAI({
-      apiKey: NVIDIA_API_KEY,
-      baseURL: NVIDIA_BASE_URL
-    })
-  : null;
 
 type SessionState = {
   callSid: string;
@@ -119,7 +112,7 @@ function pcmToWav(pcm16: Buffer, sampleRate = 8000) {
 }
 
 async function transcribeWithParakeet(callSid: string, pcm16Chunks: Buffer[]) {
-  if (!asrClient) {
+  if (!NVIDIA_API_KEY) {
     console.warn(`[asr][${callSid}] NVIDIA_API_KEY missing; transcription skipped`);
     return '';
   }
@@ -128,12 +121,46 @@ async function transcribeWithParakeet(callSid: string, pcm16Chunks: Buffer[]) {
   if (pcm.length < 1600) return '';
 
   const wav = pcmToWav(pcm, 8000);
-  const file = await toFile(wav, `${callSid}.wav`, { type: 'audio/wav' });
-  const resp = await asrClient.audio.transcriptions.create({
-    model: NVIDIA_ASR_MODEL,
-    file
-  });
-  return typeof resp.text === 'string' ? resp.text.trim() : '';
+  const endpoints: string[] = [];
+  if (NVIDIA_ASR_URL) {
+    endpoints.push(NVIDIA_ASR_URL);
+  } else {
+    const trimmed = NVIDIA_BASE_URL.replace(/\/+$/, '');
+    if (trimmed.endsWith('/v1')) {
+      endpoints.push(`${trimmed}/audio/transcriptions`);
+    } else {
+      endpoints.push(`${trimmed}/v1/audio/transcriptions`);
+      endpoints.push(`${trimmed}/audio/transcriptions`);
+    }
+  }
+
+  for (const endpoint of endpoints) {
+    const form = new FormData();
+    form.append('model', NVIDIA_ASR_MODEL);
+    form.append('file', new Blob([wav], { type: 'audio/wav' }), `${callSid}.wav`);
+    form.append('language', 'en');
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${NVIDIA_API_KEY}`
+      },
+      body: form
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      console.error(
+        `[asr][${callSid}] ASR HTTP ${response.status} endpoint=${endpoint} body=${body.slice(0, 240)}`
+      );
+      continue;
+    }
+
+    const json = (await response.json()) as { text?: string };
+    return typeof json.text === 'string' ? json.text.trim() : '';
+  }
+
+  return '';
 }
 
 async function postTranscriptToApi(callSid: string, transcript: string) {
