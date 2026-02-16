@@ -19,4 +19,7 @@ app.use('/menu', menuRoutes);
 
 app.listen(env.PORT, () => {
   console.log(`api listening on :${env.PORT}`);
+  console.log(
+    `[config] OPENAI_ENABLED=${Boolean(env.OPENAI_API_KEY)} OPENAI_MODEL=${env.OPENAI_MODEL}`
+  );
 });

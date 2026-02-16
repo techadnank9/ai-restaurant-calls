@@ -247,13 +247,30 @@ function fallbackTurn(): OrderTurn {
 }
 
 async function runOrderTurn(
+  callSid: string,
   callState: CallState,
   latestUtterance: string,
   availableMenu: MenuItem[]
 ): Promise<OrderTurn> {
-  if (!openai) return fallbackTurn();
+  if (!openai) {
+    console.warn(`[gpt][${callSid}] OPENAI disabled, using fallback turn`);
+    return fallbackTurn();
+  }
 
   try {
+    const payload = {
+      restaurant_name: callState.restaurantName,
+      stage: callState.stage,
+      latest_utterance: latestUtterance,
+      collected: {
+        customer_name: callState.customerName,
+        pickup_time: callState.pickupTime,
+        items: callState.items
+      },
+      available_menu: availableMenu
+    };
+    console.log(`[gpt][${callSid}] prompt=${JSON.stringify(payload)}`);
+
     const completion = await openai.chat.completions.create({
       model: env.OPENAI_MODEL,
       temperature: 0.2,
@@ -265,17 +282,7 @@ async function runOrderTurn(
         },
         {
           role: 'user',
-          content: JSON.stringify({
-            restaurant_name: callState.restaurantName,
-            stage: callState.stage,
-            latest_utterance: latestUtterance,
-            collected: {
-              customer_name: callState.customerName,
-              pickup_time: callState.pickupTime,
-              items: callState.items
-            },
-            available_menu: availableMenu
-          })
+          content: JSON.stringify(payload)
         }
       ],
       response_format: {
@@ -341,8 +348,12 @@ async function runOrderTurn(
 
     const content = completion.choices[0]?.message?.content;
     if (!content) return fallbackTurn();
-    return sanitizeTurn(JSON.parse(content));
-  } catch {
+    console.log(`[gpt][${callSid}] raw_response=${content}`);
+    const parsed = sanitizeTurn(JSON.parse(content));
+    console.log(`[gpt][${callSid}] parsed_turn=${JSON.stringify(parsed)}`);
+    return parsed;
+  } catch (error) {
+    console.error(`[gpt][${callSid}] error`, error);
     return fallbackTurn();
   }
 }
@@ -599,7 +610,7 @@ router.post('/converse', async (req, res) => {
     state.transcriptLines.push('Assistant: Okay, let us update your order. Please tell me the correct details.');
   }
 
-  const llmTurn = await runOrderTurn(state, spoken, state.menuItems);
+  const llmTurn = await runOrderTurn(callSid, state, spoken, state.menuItems);
 
   if (llmTurn.customer_name) state.customerName = llmTurn.customer_name;
   if (llmTurn.pickup_time) state.pickupTime = llmTurn.pickup_time;
@@ -647,6 +658,11 @@ router.post('/converse', async (req, res) => {
   }
 
   state.transcriptLines.push(`Assistant: ${assistantReply}`);
+  console.log(
+    `[call][${callSid}] assistant_reply=\"${assistantReply}\" stage=${state.stage} items=${JSON.stringify(
+      state.items
+    )} unknown=${JSON.stringify(state.unknownItems)}`
+  );
 
   await supabaseAdmin.from('calls').upsert(
     {
