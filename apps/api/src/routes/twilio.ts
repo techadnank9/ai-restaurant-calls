@@ -754,7 +754,7 @@ router.post('/voice', async (req, res) => {
       stage: 'GREETING',
       turnCount: 0,
       transcriptLines: [],
-      introCaptured: false,
+      introCaptured: true,
       awaitingIntentChoice: true,
       customerName: null,
       customerPhone: from || 'unknown',
@@ -804,7 +804,10 @@ router.post('/voice', async (req, res) => {
     method: 'POST',
     action: converseUrl
   });
-  gather.say({ voice: ASSISTANT_VOICE }, voiceConfig.greetingText);
+  gather.say(
+    { voice: ASSISTANT_VOICE },
+    `${voiceConfig.greetingText} Would you like to place an order, or make a reservation?`
+  );
 
   response.say({ voice: ASSISTANT_VOICE }, 'Sorry, I did not hear anything. Goodbye.');
   response.hangup();
@@ -842,7 +845,7 @@ router.post('/converse', async (req, res) => {
         stage: 'COLLECT_ITEMS',
         turnCount: 0,
         transcriptLines: [],
-        introCaptured: false,
+        introCaptured: true,
         awaitingIntentChoice: true,
         customerName: null,
         customerPhone: from || 'unknown',
@@ -903,32 +906,6 @@ router.post('/converse', async (req, res) => {
   }
 
   state.transcriptLines.push(`Customer: ${spoken}`);
-
-  if (!state.introCaptured) {
-    state.introCaptured = true;
-    await saveCallState(callSid, state);
-
-    const introUrl = buildUrl(req, '/twilio/converse', {
-      restaurant_id: state.restaurantId,
-      called,
-      from,
-      turn: String(state.turnCount + 1)
-    });
-
-    const gatherIntro = twiml.gather({
-      input: ['speech'],
-      speechTimeout: 'auto',
-      method: 'POST',
-      action: introUrl
-    });
-    gatherIntro.say(
-      { voice: ASSISTANT_VOICE },
-      'Would you like to place an order, or make a reservation?'
-    );
-    twiml.say({ voice: ASSISTANT_VOICE }, 'Sorry, I did not hear that. Please call again.');
-    twiml.hangup();
-    return res.type('text/xml').send(twiml.toString());
-  }
 
   if (state.awaitingIntentChoice) {
     const intentTurn = await runIntentTurn(callSid, state.restaurantName, spoken);
