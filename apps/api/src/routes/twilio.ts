@@ -9,10 +9,11 @@ const router = Router();
 const DEFAULT_MEDIA_WS_URL = 'ws://localhost:8081/media-stream';
 const MAX_TURNS = 6;
 const STATE_TTL_SECONDS = 60 * 30;
+const ASSISTANT_VOICE = 'Polly.Joanna';
 const RETRY_LINES = [
-  'Sorry, the line was noisy. Please repeat your order.',
-  'I missed that. Please say the item and quantity again.',
-  'Sorry, I could not hear that clearly. Please repeat one more time.'
+  'Sorry, I missed that. Could you say your order one more time?',
+  'Thanks. I did not catch it clearly. Please repeat the item and quantity.',
+  'Sorry about that. Please repeat slowly, and I will get it right.'
 ];
 
 const openai = env.LLM_API_KEY
@@ -43,6 +44,7 @@ type MenuItem = {
 type VoiceConfig = {
   brandName: string;
   greetingText: string;
+  greetingFollowupText: string;
   strictMenuValidation: boolean;
   orderTypeDefault: 'pickup';
 };
@@ -181,7 +183,10 @@ function readVoiceConfig(restaurantName: string, menuJson: unknown): VoiceConfig
   const brandName = toStringValue(meta.brand_name) || restaurantName;
   const greetingText =
     toStringValue(meta.greeting_text) ||
-    `Thanks for calling ${brandName}. Please tell me your pickup order.`;
+    `Hi, thanks for calling ${brandName}.`;
+  const greetingFollowupText =
+    toStringValue(meta.greeting_followup_text) ||
+    'What can I get started for your pickup order today?';
 
   const strictRaw = toStringValue(meta.strict_menu_validation).toLowerCase();
   const strictMenuValidation = strictRaw ? strictRaw !== 'false' : true;
@@ -189,6 +194,7 @@ function readVoiceConfig(restaurantName: string, menuJson: unknown): VoiceConfig
   return {
     brandName,
     greetingText,
+    greetingFollowupText,
     strictMenuValidation,
     orderTypeDefault: 'pickup'
   };
@@ -269,15 +275,13 @@ function sanitizeSpeechReply(reply: string) {
 
 function friendlyConfirmReply(state: CallState) {
   const summary = summarizeItems(state.items);
-  return `Got it. I have ${summary} for pickup at ${state.pickupTime}. The name is ${
-    state.customerName
-  }. Is everything correct? Please say yes or no.`;
+  return `Great, I have ${summary} for pickup at ${state.pickupTime} under ${state.customerName}. Does that sound right?`;
 }
 
 function confirmationClosing(name: string | null, pickupTime: string | null) {
   const callerName = name?.trim() ? name.trim() : 'there';
   const pickup = pickupTime?.trim() ? pickupTime.trim() : 'the requested time';
-  return `Perfect, ${callerName}. Your pickup order is confirmed for ${pickup}. Thank you for calling.`;
+  return `Perfect, ${callerName}. Your pickup order is confirmed for ${pickup}. We will have it ready.`;
 }
 
 async function runOrderTurn(
@@ -314,7 +318,7 @@ async function runOrderTurn(
         {
           role: 'system',
           content:
-            'You are a warm, natural restaurant phone ordering agent. Use only menu items from AVAILABLE_MENU and never invent items. Keep each response to 1-2 short sentences, with friendly spoken phrasing. Ask exactly one question at a time. Collect customer_name, pickup_time, and item quantities. If an unknown item is requested, add it to unknown_items and politely ask for a valid menu item. Mark is_order_complete true only when customer_name, at least one valid item, and pickup_time are present.'
+            'You are a highly natural restaurant phone ordering agent. Speak like a friendly human host, not a bot. Use contractions and short spoken phrasing. Keep each turn to 1-2 brief sentences (max 22 words each). Ask exactly one clear follow-up question. Use only items from AVAILABLE_MENU and never invent menu items. Collect customer_name, pickup_time, and item quantities. If an item is unknown, add it to unknown_items and politely offer available menu alternatives. Mark is_order_complete true only when customer_name, at least one valid item, and pickup_time are present.'
         },
         {
           role: 'user',
@@ -580,7 +584,10 @@ router.post('/voice', async (req, res) => {
   const response = new twilio.twiml.VoiceResponse();
 
   if (!restaurant?.id) {
-    response.say('Sorry, this number is not configured yet. Please try again later.');
+    response.say(
+      { voice: ASSISTANT_VOICE },
+      'Sorry, this number is not set up yet. Please call again later.'
+    );
     response.hangup();
     return res.type('text/xml').send(response.toString());
   }
@@ -633,11 +640,14 @@ router.post('/voice', async (req, res) => {
 
   if (!env.TWILIO_SPEECH_GATHER_ENABLED) {
     response.say(
-      { voice: 'alice' },
-      `${voiceConfig.greetingText} Please say your full pickup order, your name, and your pickup time after the tone.`
+      { voice: ASSISTANT_VOICE },
+      `${voiceConfig.greetingText} ${voiceConfig.greetingFollowupText} Please say your full pickup order, your name, and your pickup time after the tone.`
     );
     response.pause({ length: 300 });
-    response.say({ voice: 'alice' }, 'We could not complete your order. Please call again.');
+    response.say(
+      { voice: ASSISTANT_VOICE },
+      'Sorry, we could not complete your order this time. Please call again.'
+    );
     response.hangup();
     return res.type('text/xml').send(response.toString());
   }
@@ -648,9 +658,9 @@ router.post('/voice', async (req, res) => {
     method: 'POST',
     action: converseUrl
   });
-  gather.say({ voice: 'alice' }, voiceConfig.greetingText);
+  gather.say({ voice: ASSISTANT_VOICE }, `${voiceConfig.greetingText} ${voiceConfig.greetingFollowupText}`);
 
-  response.say({ voice: 'alice' }, 'Sorry, I did not hear anything. Goodbye.');
+  response.say({ voice: ASSISTANT_VOICE }, 'Sorry, I did not hear anything. Goodbye.');
   response.hangup();
 
   res.type('text/xml').send(response.toString());
@@ -666,7 +676,7 @@ router.post('/converse', async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
   if (!callSid) {
-    twiml.say('We could not identify your call. Please call again.');
+    twiml.say({ voice: ASSISTANT_VOICE }, 'We could not identify your call. Please call again.');
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
   }
@@ -701,7 +711,7 @@ router.post('/converse', async (req, res) => {
   }
 
   if (!state) {
-    twiml.say('Session expired. Please call again.');
+    twiml.say({ voice: ASSISTANT_VOICE }, 'Your session expired. Please call again.');
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
   }
@@ -712,7 +722,10 @@ router.post('/converse', async (req, res) => {
   if (!spoken) {
     if (state.turnCount >= MAX_TURNS) {
       await failCall(callSid, 'Call failed due to repeated no speech input.');
-      twiml.say('Sorry, we are unable to hear you. Please call again. Goodbye.');
+      twiml.say(
+        { voice: ASSISTANT_VOICE },
+        'Sorry, I still cannot hear you clearly. Please call again. Goodbye.'
+      );
       twiml.hangup();
       return res.type('text/xml').send(twiml.toString());
     }
@@ -730,8 +743,8 @@ router.post('/converse', async (req, res) => {
       method: 'POST',
       action: retryUrl
     });
-    gatherRetry.say({ voice: 'alice' }, 'I did not catch that. Please repeat your order details.');
-    twiml.say('Still no response. Goodbye.');
+    gatherRetry.say({ voice: ASSISTANT_VOICE }, 'I missed that. Please repeat your order details.');
+    twiml.say({ voice: ASSISTANT_VOICE }, 'Still no response. Goodbye.');
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
   }
@@ -748,7 +761,7 @@ router.post('/converse', async (req, res) => {
       state.awaitingConfirmation = false;
       await saveCallState(callSid, state);
 
-      twiml.say({ voice: 'alice' }, confirmationClosing(state.customerName, state.pickupTime));
+      twiml.say({ voice: ASSISTANT_VOICE }, confirmationClosing(state.customerName, state.pickupTime));
       twiml.hangup();
       return res.type('text/xml').send(twiml.toString());
     }
@@ -824,7 +837,10 @@ router.post('/converse', async (req, res) => {
 
   if (state.turnCount >= MAX_TURNS && !state.awaitingConfirmation) {
     await failCall(callSid, state.transcriptLines.join('\n'));
-    twiml.say({ voice: 'alice' }, 'I could not complete your order details right now. Please call again. Goodbye.');
+    twiml.say(
+      { voice: ASSISTANT_VOICE },
+      'I could not complete your order details right now. Please call again. Goodbye.'
+    );
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
   }
@@ -844,10 +860,10 @@ router.post('/converse', async (req, res) => {
     method: 'POST',
     action: nextUrl
   });
-  gather.say({ voice: 'alice' }, assistantReply);
+  gather.say({ voice: ASSISTANT_VOICE }, assistantReply);
 
   const retryLine = RETRY_LINES[(state.turnCount - 1) % RETRY_LINES.length];
-  twiml.say({ voice: 'alice' }, retryLine);
+  twiml.say({ voice: ASSISTANT_VOICE }, retryLine);
   twiml.hangup();
   return res.type('text/xml').send(twiml.toString());
 });
