@@ -18,9 +18,7 @@ const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL ?? 'nova-3';
 const DEEPGRAM_LANGUAGE = process.env.DEEPGRAM_LANGUAGE ?? 'en';
 const DEEPGRAM_SMART_FORMAT =
   (process.env.DEEPGRAM_SMART_FORMAT ?? 'true').toLowerCase() === 'true';
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY ?? '';
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID ?? '';
-const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID ?? 'eleven_turbo_v2_5';
+const DEEPGRAM_TTS_MODEL = process.env.DEEPGRAM_TTS_MODEL ?? 'aura-2-thalia-en';
 
 const redis = new Redis(REDIS_URL);
 redis.on('error', (error) => {
@@ -147,23 +145,27 @@ async function callRealtimeTurn(
   return (await response.json()) as RealtimeTurnResponse;
 }
 
-async function synthesizeElevenLabs(text: string) {
-  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return Buffer.alloc(0);
-  const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000`;
+async function synthesizeDeepgramTts(text: string) {
+  if (!DEEPGRAM_API_KEY) return Buffer.alloc(0);
+  const endpoint = new URL('https://api.deepgram.com/v1/speak');
+  endpoint.searchParams.set('model', DEEPGRAM_TTS_MODEL);
+  endpoint.searchParams.set('encoding', 'mulaw');
+  endpoint.searchParams.set('sample_rate', '8000');
+  endpoint.searchParams.set('container', 'none');
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
-      'xi-api-key': ELEVENLABS_API_KEY,
+      Authorization: `Token ${DEEPGRAM_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      text,
-      model_id: ELEVENLABS_MODEL_ID
+      text
     })
   });
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`elevenlabs failed ${response.status}: ${body}`);
+    throw new Error(`deepgram tts failed ${response.status}: ${body}`);
   }
   const buf = Buffer.from(await response.arrayBuffer());
   return buf;
@@ -215,7 +217,7 @@ async function handleFinalTranscript(session: LiveSession, transcript: string) {
     const reply = (turn.assistant_reply ?? '').trim();
     if (!reply) return;
     console.log(`[turn][${session.callSid}] reply=${reply}`);
-    const audio = await synthesizeElevenLabs(reply);
+    const audio = await synthesizeDeepgramTts(reply);
     await playTwilioUlaw(session, audio);
   } catch (error) {
     console.error(`[turn][${session.callSid}] realtime handling error`, error);
@@ -372,8 +374,6 @@ wss.on('connection', (ws) => {
 server.listen(WS_PORT, () => {
   console.log(`media-ws listening on :${WS_PORT}`);
   console.log(
-    `[config] REALTIME_DEEPGRAM_ENABLED=${REALTIME_DEEPGRAM_ENABLED} DEEPGRAM_MODEL=${DEEPGRAM_MODEL} ELEVENLABS_VOICE_CONFIGURED=${Boolean(
-      ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID
-    )}`
+    `[config] REALTIME_DEEPGRAM_ENABLED=${REALTIME_DEEPGRAM_ENABLED} DEEPGRAM_MODEL=${DEEPGRAM_MODEL} DEEPGRAM_TTS_MODEL=${DEEPGRAM_TTS_MODEL}`
   );
 });

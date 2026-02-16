@@ -29,8 +29,7 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
    - `DEEPGRAM_MODEL=nova-3`
    - `DEEPGRAM_LANGUAGE=en`
    - `DEEPGRAM_SMART_FORMAT=true`
-   - `ELEVENLABS_API_KEY=...`
-   - `ELEVENLABS_VOICE_ID=...`
+   - `DEEPGRAM_TTS_MODEL=aura-2-thalia-en`
    - `INTERNAL_API_KEY=<shared secret between api and media-ws>`
    - `REALTIME_DEEPGRAM_ENABLED=true`
    - `TWILIO_SPEECH_GATHER_ENABLED=true` (fallback path remains available)
@@ -49,7 +48,7 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
 - Endpoint returns TwiML that starts media streaming to `{MEDIA_WS_URL}`.
 - Call recording should remain OFF in Twilio Console to avoid recording charges.
 - With `REALTIME_DEEPGRAM_ENABLED=true`, media-ws streams Twilio call audio to Deepgram and posts final transcripts to `/twilio/realtime-turn`.
-- API returns assistant reply text; media-ws synthesizes voice via ElevenLabs and streams audio back to the caller.
+- API returns assistant reply text; media-ws synthesizes voice via Deepgram TTS and streams audio back to the caller.
 - `/twilio/converse` remains as fallback when realtime media is unavailable.
 
 ## Restaurant Voice Config (menu_json.meta)
