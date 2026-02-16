@@ -15,6 +15,7 @@ const RETRY_LINES = [
   'Thanks. I did not catch it clearly. Please repeat the item and quantity.',
   'Sorry about that. Please repeat slowly, and I will get it right.'
 ];
+const ACK_OPENERS = ['Got it.', 'Perfect.', 'Sounds good.', 'Okay, thanks.', 'Great.'];
 
 const openai = env.LLM_API_KEY
   ? new OpenAI({
@@ -60,6 +61,8 @@ type CallState = {
   stage: GatherStage;
   turnCount: number;
   transcriptLines: string[];
+  introCaptured: boolean;
+  awaitingIntentChoice: boolean;
   customerName: string | null;
   customerPhone: string;
   pickupTime: string | null;
@@ -88,6 +91,11 @@ type OrderTurn = {
   assistant_reply: string;
   next_question: string | null;
   order_type: 'pickup';
+};
+
+type IntentTurn = {
+  intent: 'order' | 'reservation' | 'unknown';
+  assistant_reply: string;
 };
 
 type MediaTranscriptBody = {
@@ -284,6 +292,43 @@ function confirmationClosing(name: string | null, pickupTime: string | null) {
   return `Perfect, ${callerName}. Your pickup order is confirmed for ${pickup}. We will have it ready.`;
 }
 
+function pickByTurn(values: string[], turn: number) {
+  if (values.length === 0) return '';
+  return values[turn % values.length];
+}
+
+function lastAssistantLine(lines: string[]) {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].startsWith('Assistant: ')) return lines[i].replace('Assistant: ', '').trim();
+  }
+  return '';
+}
+
+function humanizeAssistantReply(state: CallState, rawReply: string) {
+  const clean = sanitizeSpeechReply(rawReply);
+  const opener = pickByTurn(ACK_OPENERS, state.turnCount);
+  let reply = clean;
+
+  if (state.stage !== 'CONFIRM_ORDER' && !/^((got it|perfect|sounds good|okay|great)\b)/i.test(clean)) {
+    reply = `${opener} ${clean}`.trim();
+  }
+
+  const previous = lastAssistantLine(state.transcriptLines).toLowerCase();
+  if (previous && previous === reply.toLowerCase()) {
+    if (state.stage === 'COLLECT_NAME') {
+      reply = 'Could I get your name for the order?';
+    } else if (state.stage === 'COLLECT_PICKUP_TIME') {
+      reply = 'What pickup time works best for you?';
+    } else if (state.stage === 'COLLECT_ITEMS') {
+      reply = 'What would you like to order? Please include quantity.';
+    } else if (state.stage === 'CONFIRM_ORDER') {
+      reply = 'Please confirm if everything is correct by saying yes or no.';
+    }
+  }
+
+  return reply;
+}
+
 async function runOrderTurn(
   callSid: string,
   callState: CallState,
@@ -437,6 +482,76 @@ function parseConfirmation(text: string) {
   return 'unknown';
 }
 
+function sanitizeIntentTurn(value: unknown): IntentTurn {
+  const obj = (value ?? {}) as Record<string, unknown>;
+  const rawIntent = toStringValue(obj.intent).toLowerCase();
+  const intent: IntentTurn['intent'] =
+    rawIntent === 'order' || rawIntent === 'reservation' ? rawIntent : 'unknown';
+  const assistant_reply =
+    toStringValue(obj.assistant_reply) ||
+    'Please say order for pickup, or reservation for table booking.';
+  return { intent, assistant_reply };
+}
+
+async function runIntentTurn(callSid: string, restaurantName: string, latestUtterance: string): Promise<IntentTurn> {
+  if (!openai) {
+    return {
+      intent: 'unknown',
+      assistant_reply: 'Please say order for pickup, or reservation for table booking.'
+    };
+  }
+
+  try {
+    const payload = {
+      restaurant_name: restaurantName,
+      latest_utterance: latestUtterance
+    };
+    console.log(`[gpt][${callSid}] intent_prompt=${JSON.stringify(payload)}`);
+
+    const completion = await openai.chat.completions.create({
+      model: env.LLM_MODEL,
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Classify caller intent for a restaurant phone line. Return JSON only. intent must be one of: order, reservation, unknown. Keep assistant_reply short and natural.'
+        },
+        {
+          role: 'user',
+          content: JSON.stringify(payload)
+        }
+      ],
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'intent_turn',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              intent: { type: 'string', enum: ['order', 'reservation', 'unknown'] },
+              assistant_reply: { type: 'string' }
+            },
+            required: ['intent', 'assistant_reply']
+          }
+        }
+      } as never
+    });
+
+    const content = completion.choices[0]?.message?.content;
+    if (!content) return sanitizeIntentTurn(null);
+    console.log(`[gpt][${callSid}] intent_raw_response=${content}`);
+    const parsed = sanitizeIntentTurn(JSON.parse(content));
+    console.log(`[gpt][${callSid}] intent_parsed=${JSON.stringify(parsed)}`);
+    return parsed;
+  } catch (error) {
+    console.error(`[gpt][${callSid}] intent_error`, error);
+    return sanitizeIntentTurn(null);
+  }
+}
+
 async function loadCallState(callSid: string): Promise<CallState | null> {
   const raw = await redis.get(`call_state:${callSid}`);
   if (!raw) return null;
@@ -528,7 +643,7 @@ async function processTranscriptTurn(callSid: string, transcript: string) {
   state.unknownItems = unknown;
   state.stage = determineStage(state);
 
-  let assistantReply = sanitizeSpeechReply(llmTurn.assistant_reply);
+  let assistantReply = humanizeAssistantReply(state, llmTurn.assistant_reply);
   if (unknown.length > 0) {
     const examples = state.menuItems.slice(0, 5).map((i) => i.name).join(', ');
     assistantReply = `Sorry, I could not find ${unknown.join(
@@ -610,6 +725,8 @@ router.post('/voice', async (req, res) => {
       stage: 'GREETING',
       turnCount: 0,
       transcriptLines: [],
+      introCaptured: false,
+      awaitingIntentChoice: true,
       customerName: null,
       customerPhone: from || 'unknown',
       pickupTime: null,
@@ -658,7 +775,7 @@ router.post('/voice', async (req, res) => {
     method: 'POST',
     action: converseUrl
   });
-  gather.say({ voice: ASSISTANT_VOICE }, `${voiceConfig.greetingText} ${voiceConfig.greetingFollowupText}`);
+  gather.say({ voice: ASSISTANT_VOICE }, voiceConfig.greetingText);
 
   response.say({ voice: ASSISTANT_VOICE }, 'Sorry, I did not hear anything. Goodbye.');
   response.hangup();
@@ -696,6 +813,8 @@ router.post('/converse', async (req, res) => {
         stage: 'COLLECT_ITEMS',
         turnCount: 0,
         transcriptLines: [],
+        introCaptured: false,
+        awaitingIntentChoice: true,
         customerName: null,
         customerPhone: from || 'unknown',
         pickupTime: null,
@@ -751,6 +870,71 @@ router.post('/converse', async (req, res) => {
 
   state.transcriptLines.push(`Customer: ${spoken}`);
 
+  if (!state.introCaptured) {
+    state.introCaptured = true;
+    await saveCallState(callSid, state);
+
+    const introUrl = buildUrl(req, '/twilio/converse', {
+      restaurant_id: state.restaurantId,
+      called,
+      from,
+      turn: String(state.turnCount + 1)
+    });
+
+    const gatherIntro = twiml.gather({
+      input: ['speech'],
+      speechTimeout: 'auto',
+      method: 'POST',
+      action: introUrl
+    });
+    gatherIntro.say(
+      { voice: ASSISTANT_VOICE },
+      'Would you like to place an order, or make a reservation?'
+    );
+    twiml.say({ voice: ASSISTANT_VOICE }, 'Sorry, I did not hear that. Please call again.');
+    twiml.hangup();
+    return res.type('text/xml').send(twiml.toString());
+  }
+
+  if (state.awaitingIntentChoice) {
+    const intentTurn = await runIntentTurn(callSid, state.restaurantName, spoken);
+    if (intentTurn.intent === 'reservation') {
+      state.transcriptLines.push(
+        `Assistant: ${sanitizeSpeechReply(intentTurn.assistant_reply)}`
+      );
+      await failCall(callSid, state.transcriptLines.join('\n'));
+      twiml.say(
+        { voice: ASSISTANT_VOICE },
+        sanitizeSpeechReply(intentTurn.assistant_reply)
+      );
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+
+    if (intentTurn.intent === 'unknown') {
+      await saveCallState(callSid, state);
+      const retryIntentUrl = buildUrl(req, '/twilio/converse', {
+        restaurant_id: state.restaurantId,
+        called,
+        from,
+        turn: String(state.turnCount + 1)
+      });
+      const gatherIntent = twiml.gather({
+        input: ['speech'],
+        speechTimeout: 'auto',
+        method: 'POST',
+        action: retryIntentUrl
+      });
+      gatherIntent.say({ voice: ASSISTANT_VOICE }, sanitizeSpeechReply(intentTurn.assistant_reply));
+      twiml.say({ voice: ASSISTANT_VOICE }, 'Sorry, I did not catch that. Goodbye.');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+
+    state.awaitingIntentChoice = false;
+    state.stage = 'COLLECT_ITEMS';
+  }
+
   if (state.awaitingConfirmation) {
     const confirmed = parseConfirmation(spoken);
 
@@ -804,7 +988,7 @@ router.post('/converse', async (req, res) => {
 
   state.stage = determineStage(state);
 
-  let assistantReply = sanitizeSpeechReply(llmTurn.assistant_reply);
+  let assistantReply = humanizeAssistantReply(state, llmTurn.assistant_reply);
 
   if (unknown.length > 0) {
     const examples = state.menuItems.slice(0, 5).map((i) => i.name).join(', ');
