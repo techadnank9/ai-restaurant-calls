@@ -11,6 +11,10 @@
     "dev:api": "npm run dev -w api",
     "dev:ws": "npm run dev -w media-ws",
     "dev:all": "concurrently -n api,ws,web -c cyan,yellow,green \"npm run dev:api\" \"npm run dev:ws\" \"npm run dev:web\"",
+    "build:deps": "npm run build -w @arc/shared && npm run build -w @arc/supabase",
+    "build:api": "npm run build:deps && npm run build -w api",
+    "build:web": "npm run build:deps && npm run build -w web",
+    "build:ws": "npm run build -w media-ws",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
