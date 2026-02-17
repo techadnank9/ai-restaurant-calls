@@ -21,15 +21,14 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
    - `cp .env.example .env`
 2. Start Redis:
    - `docker compose up -d redis`
-3. Set envs in `.env` for voice order conversation:
-   - `NVIDIA_API_KEY=...`
-   - `NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1`
-   - `NVIDIA_LLM_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5`
+3. Set envs in `.env` for Twilio + Deepgram voice conversation:
    - `DEEPGRAM_API_KEY=...`
-   - `DEEPGRAM_MODEL=nova-3`
-   - `DEEPGRAM_LANGUAGE=en`
-   - `DEEPGRAM_SMART_FORMAT=true`
-   - `DEEPGRAM_TTS_MODEL=aura-2-thalia-en`
+   - `DEEPGRAM_AGENT_LISTEN_MODEL=nova-3`
+   - `DEEPGRAM_AGENT_SPEAK_MODEL=aura-2-thalia-en`
+   - `DEEPGRAM_AGENT_THINK_PROVIDER=deepgram`
+   - `DEEPGRAM_AGENT_THINK_MODEL=<optional>`
+   - `DEEPGRAM_AGENT_GREETING=Thanks for calling ...`
+   - `DEEPGRAM_AGENT_PROMPT=...`
    - `INTERNAL_API_KEY=<shared secret between api and media-ws>`
    - `REALTIME_DEEPGRAM_ENABLED=true`
    - `TWILIO_SPEECH_GATHER_ENABLED=true` (fallback path remains available)
@@ -47,8 +46,8 @@ TypeScript npm-workspaces monorepo for AI restaurant phone ordering.
 - Configure voice webhook URL to: `POST {APP_BASE_URL}/twilio/voice`
 - Endpoint returns TwiML that starts media streaming to `{MEDIA_WS_URL}`.
 - Call recording should remain OFF in Twilio Console to avoid recording charges.
-- With `REALTIME_DEEPGRAM_ENABLED=true`, media-ws streams Twilio call audio to Deepgram and posts final transcripts to `/twilio/realtime-turn`.
-- API returns assistant reply text; media-ws synthesizes voice via Deepgram TTS and streams audio back to the caller.
+- With `REALTIME_DEEPGRAM_ENABLED=true`, media-ws bridges Twilio audio directly to Deepgram Agent (single realtime websocket).
+- Deepgram Agent speech audio is streamed back to Twilio, and function calls are handled by `/agent/tools/*`.
 - `/twilio/converse` remains as fallback when realtime media is unavailable.
 
 ## Deepgram Agent tool endpoints

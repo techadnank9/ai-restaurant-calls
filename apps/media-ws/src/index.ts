@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import express from 'express';
 import { createServer } from 'http';
 import { Redis } from 'ioredis';
+import { AgentEvents, createClient, type AgentLiveSchema, type FunctionCallResponse } from '@deepgram/sdk';
 import WebSocket, { WebSocketServer } from 'ws';
 
 dotenv.config({ path: '../../.env' });
@@ -14,22 +15,17 @@ const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? '';
 const REALTIME_DEEPGRAM_ENABLED =
   (process.env.REALTIME_DEEPGRAM_ENABLED ?? 'true').toLowerCase() === 'true';
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY ?? '';
-const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL ?? 'nova-3';
-const DEEPGRAM_LANGUAGE = process.env.DEEPGRAM_LANGUAGE ?? 'en';
-const DEEPGRAM_SMART_FORMAT =
-  (process.env.DEEPGRAM_SMART_FORMAT ?? 'true').toLowerCase() === 'true';
-const DEEPGRAM_TTS_MODEL = process.env.DEEPGRAM_TTS_MODEL ?? 'aura-2-thalia-en';
-
-const redis = new Redis(REDIS_URL);
-redis.on('error', (error) => {
-  console.error('redis connection error', error.message);
-});
-
-const app = express();
-app.get('/health', (_req, res) => res.json({ ok: true }));
-
-const server = createServer(app);
-const wss = new WebSocketServer({ server, path: '/media-stream' });
+const DEEPGRAM_AGENT_LANGUAGE = process.env.DEEPGRAM_AGENT_LANGUAGE ?? 'en';
+const DEEPGRAM_AGENT_LISTEN_MODEL = process.env.DEEPGRAM_AGENT_LISTEN_MODEL ?? 'nova-3';
+const DEEPGRAM_AGENT_SPEAK_MODEL = process.env.DEEPGRAM_AGENT_SPEAK_MODEL ?? 'aura-2-thalia-en';
+const DEEPGRAM_AGENT_GREETING =
+  process.env.DEEPGRAM_AGENT_GREETING ??
+  'Thanks for calling New Delhi Restaurant. Would you like to place an order or make a reservation?';
+const DEEPGRAM_AGENT_PROMPT =
+  process.env.DEEPGRAM_AGENT_PROMPT ??
+  'You are the phone assistant for New Delhi Restaurant. Be warm and concise. First help with either pickup orders or table reservations. For orders, use function tools to validate menu items and totals before confirming. Never hallucinate unavailable menu items. Ask clarifying questions when details are missing. Confirm details before finalizing.';
+const DEEPGRAM_AGENT_THINK_PROVIDER = process.env.DEEPGRAM_AGENT_THINK_PROVIDER ?? 'deepgram';
+const DEEPGRAM_AGENT_THINK_MODEL = process.env.DEEPGRAM_AGENT_THINK_MODEL ?? '';
 
 type SessionState = {
   callSid: string;
@@ -43,26 +39,39 @@ type SessionState = {
   status: 'active' | 'stopped';
 };
 
-type RealtimeTurnResponse = {
-  assistant_reply?: string;
-  intent?: 'order' | 'reservation' | 'unknown';
-  awaiting_confirmation?: boolean;
-  should_end_call?: boolean;
+type FunctionCallRequest = {
+  id: string;
+  name: string;
+  arguments: string;
+  client_side?: boolean;
 };
 
 type LiveSession = {
   callSid: string;
   streamSid: string;
   twilioWs: WebSocket;
-  deepgramWs?: WebSocket;
-  segmentSeq: number;
-  lastFinalTranscript: string;
+  agentConn?: ReturnType<ReturnType<typeof createClient>['agent']>;
+  keepAliveTimer?: NodeJS.Timeout;
   playbackToken: number;
   ttsPlaying: boolean;
   ended: boolean;
+  restaurantId?: string;
+  calledNumber?: string;
 };
 
+const redis = new Redis(REDIS_URL);
+redis.on('error', (error) => {
+  console.error('redis connection error', error.message);
+});
+
+const app = express();
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+const server = createServer(app);
+const wss = new WebSocketServer({ server, path: '/media-stream' });
+
 const sessions = new Map<string, LiveSession>();
+const deepgram = DEEPGRAM_API_KEY ? createClient(DEEPGRAM_API_KEY) : null;
 
 async function saveSession(callSid: string, state: SessionState) {
   await redis.set(`call:${callSid}`, JSON.stringify(state), 'EX', 60 * 60 * 2);
@@ -94,20 +103,6 @@ function rmsFromMulawPayload(payloadB64: string) {
   return Math.sqrt(sumSquares / muLaw.length);
 }
 
-function buildDeepgramUrl() {
-  const url = new URL('wss://api.deepgram.com/v1/listen');
-  url.searchParams.set('encoding', 'mulaw');
-  url.searchParams.set('sample_rate', '8000');
-  url.searchParams.set('channels', '1');
-  url.searchParams.set('model', DEEPGRAM_MODEL);
-  url.searchParams.set('language', DEEPGRAM_LANGUAGE);
-  url.searchParams.set('smart_format', String(DEEPGRAM_SMART_FORMAT));
-  url.searchParams.set('interim_results', 'true');
-  url.searchParams.set('endpointing', '300');
-  url.searchParams.set('punctuate', 'true');
-  return url.toString();
-}
-
 function clearTwilioPlayback(session: LiveSession) {
   if (session.twilioWs.readyState !== WebSocket.OPEN) return;
   session.twilioWs.send(
@@ -116,59 +111,6 @@ function clearTwilioPlayback(session: LiveSession) {
       streamSid: session.streamSid
     })
   );
-}
-
-async function callRealtimeTurn(
-  callSid: string,
-  transcript: string,
-  isFinal: boolean,
-  segmentId: string
-): Promise<RealtimeTurnResponse> {
-  const endpoint = new URL('/twilio/realtime-turn', APP_BASE_URL).toString();
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(INTERNAL_API_KEY ? { 'x-internal-api-key': INTERNAL_API_KEY } : {})
-    },
-    body: JSON.stringify({
-      callSid,
-      transcript,
-      is_final: isFinal,
-      segment_id: segmentId
-    })
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`realtime-turn failed ${response.status}: ${body}`);
-  }
-  return (await response.json()) as RealtimeTurnResponse;
-}
-
-async function synthesizeDeepgramTts(text: string) {
-  if (!DEEPGRAM_API_KEY) return Buffer.alloc(0);
-  const endpoint = new URL('https://api.deepgram.com/v1/speak');
-  endpoint.searchParams.set('model', DEEPGRAM_TTS_MODEL);
-  endpoint.searchParams.set('encoding', 'mulaw');
-  endpoint.searchParams.set('sample_rate', '8000');
-  endpoint.searchParams.set('container', 'none');
-
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      Authorization: `Token ${DEEPGRAM_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      text
-    })
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`deepgram tts failed ${response.status}: ${body}`);
-  }
-  const buf = Buffer.from(await response.arrayBuffer());
-  return buf;
 }
 
 async function playTwilioUlaw(session: LiveSession, audio: Buffer) {
@@ -192,9 +134,7 @@ async function playTwilioUlaw(session: LiveSession, audio: Buffer) {
       JSON.stringify({
         event: 'media',
         streamSid: session.streamSid,
-        media: {
-          payload: chunk.toString('base64')
-        }
+        media: { payload: chunk.toString('base64') }
       })
     );
     await sleep(20);
@@ -203,68 +143,277 @@ async function playTwilioUlaw(session: LiveSession, audio: Buffer) {
   session.ttsPlaying = false;
 }
 
-async function handleFinalTranscript(session: LiveSession, transcript: string) {
-  const normalized = transcript.trim();
-  if (!normalized) return;
-  if (normalized.toLowerCase() === session.lastFinalTranscript.toLowerCase()) return;
-  session.lastFinalTranscript = normalized;
+async function callInternalTool(toolName: string, args: Record<string, unknown>, session: LiveSession) {
+  const endpoint = `${APP_BASE_URL}/agent/tools/${toolName}`;
+  const body = {
+    ...args,
+    restaurant_id: String(args.restaurant_id ?? session.restaurantId ?? '')
+  };
 
-  const segmentId = `${session.callSid}-${++session.segmentSeq}`;
-  console.log(`[deepgram][${session.callSid}] final=${normalized}`);
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(INTERNAL_API_KEY ? { 'x-internal-api-key': INTERNAL_API_KEY } : {})
+    },
+    body: JSON.stringify(body)
+  });
 
+  const payloadText = await response.text();
+  let payload: unknown = payloadText;
   try {
-    const turn = await callRealtimeTurn(session.callSid, normalized, true, segmentId);
-    const reply = (turn.assistant_reply ?? '').trim();
-    if (!reply) return;
-    console.log(`[turn][${session.callSid}] reply=${reply}`);
-    const audio = await synthesizeDeepgramTts(reply);
-    await playTwilioUlaw(session, audio);
-  } catch (error) {
-    console.error(`[turn][${session.callSid}] realtime handling error`, error);
+    payload = JSON.parse(payloadText);
+  } catch {
+    // keep as plain text
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: `tool ${toolName} failed with ${response.status}`,
+      details: payload
+    };
+  }
+
+  return payload;
+}
+
+async function respondToFunctionCalls(session: LiveSession, req: { functions?: FunctionCallRequest[] }) {
+  const funcs = Array.isArray(req.functions) ? req.functions : [];
+  if (!funcs.length || !session.agentConn) return;
+
+  for (const fn of funcs) {
+    const response: FunctionCallResponse = {
+      id: fn.id,
+      name: fn.name,
+      content: ''
+    };
+
+    try {
+      const parsedArgs = fn.arguments ? (JSON.parse(fn.arguments) as Record<string, unknown>) : {};
+      const result = await callInternalTool(fn.name, parsedArgs, session);
+      response.content = JSON.stringify(result);
+      console.log(`[agent][${session.callSid}] tool=${fn.name} ok`);
+    } catch (error) {
+      response.content = JSON.stringify({ ok: false, error: String(error) });
+      console.error(`[agent][${session.callSid}] tool=${fn.name} error`, error);
+    }
+
+    session.agentConn.functionCallResponse(response);
   }
 }
 
-function openDeepgramForSession(session: LiveSession) {
-  if (!REALTIME_DEEPGRAM_ENABLED || !DEEPGRAM_API_KEY) return;
-  const dg = new WebSocket(buildDeepgramUrl(), {
-    headers: {
-      Authorization: `Token ${DEEPGRAM_API_KEY}`
+function buildAgentConfig(session: LiveSession): AgentLiveSchema {
+  const thinkProvider = {
+    type: DEEPGRAM_AGENT_THINK_PROVIDER,
+    ...(DEEPGRAM_AGENT_THINK_MODEL ? { model: DEEPGRAM_AGENT_THINK_MODEL } : {})
+  };
+
+  return {
+    audio: {
+      input: {
+        encoding: 'mulaw',
+        sample_rate: 8000
+      },
+      output: {
+        encoding: 'mulaw',
+        sample_rate: 8000,
+        container: 'none'
+      }
+    },
+    agent: {
+      language: DEEPGRAM_AGENT_LANGUAGE,
+      greeting: DEEPGRAM_AGENT_GREETING,
+      listen: {
+        provider: {
+          type: 'deepgram',
+          model: DEEPGRAM_AGENT_LISTEN_MODEL
+        }
+      },
+      think: {
+        provider: thinkProvider,
+        prompt: `${DEEPGRAM_AGENT_PROMPT}\nRestaurantId: ${session.restaurantId ?? 'unknown'}\nCalledNumber: ${session.calledNumber ?? 'unknown'}`,
+        functions: [
+          {
+            name: 'get_menu',
+            description: 'Get current restaurant menu',
+            parameters: {
+              type: 'object',
+              properties: { restaurant_id: { type: 'string' } },
+              required: ['restaurant_id']
+            }
+          },
+          {
+            name: 'check_availability',
+            description: 'Check table reservation availability',
+            parameters: {
+              type: 'object',
+              properties: {
+                restaurant_id: { type: 'string' },
+                date: { type: 'string' },
+                time: { type: 'string' },
+                party_size: { type: 'integer' }
+              },
+              required: ['restaurant_id', 'date', 'time', 'party_size']
+            }
+          },
+          {
+            name: 'build_order',
+            description: 'Validate and build a draft pickup order from menu items',
+            parameters: {
+              type: 'object',
+              properties: {
+                restaurant_id: { type: 'string' },
+                customer_name: { type: 'string' },
+                customer_phone: { type: 'string' },
+                pickup_time: { type: 'string' },
+                special_instructions: { type: 'string' },
+                items: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      quantity: { type: 'integer' },
+                      options: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          properties: {
+                            name: { type: 'string' },
+                            value: { type: 'string' }
+                          },
+                          required: ['name', 'value']
+                        }
+                      }
+                    },
+                    required: ['name', 'quantity']
+                  }
+                }
+              },
+              required: ['restaurant_id', 'customer_phone', 'pickup_time', 'items']
+            }
+          },
+          {
+            name: 'confirm_order',
+            description: 'Persist a confirmed pickup order',
+            parameters: {
+              type: 'object',
+              properties: {
+                restaurant_id: { type: 'string' },
+                customer_name: { type: 'string' },
+                customer_phone: { type: 'string' },
+                pickup_time: { type: 'string' },
+                special_instructions: { type: 'string' },
+                items: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      quantity: { type: 'integer' },
+                      options: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          properties: {
+                            name: { type: 'string' },
+                            value: { type: 'string' }
+                          },
+                          required: ['name', 'value']
+                        }
+                      }
+                    },
+                    required: ['name', 'quantity']
+                  }
+                }
+              },
+              required: ['restaurant_id', 'customer_phone', 'pickup_time', 'items']
+            }
+          },
+          {
+            name: 'create_reservation',
+            description: 'Create a restaurant reservation request',
+            parameters: {
+              type: 'object',
+              properties: {
+                restaurant_id: { type: 'string' },
+                customer_name: { type: 'string' },
+                customer_phone: { type: 'string' },
+                date: { type: 'string' },
+                time: { type: 'string' },
+                party_size: { type: 'integer' },
+                notes: { type: 'string' }
+              },
+              required: ['restaurant_id', 'customer_name', 'customer_phone', 'date', 'time', 'party_size']
+            }
+          }
+        ]
+      },
+      speak: {
+        provider: {
+          type: 'deepgram',
+          model: DEEPGRAM_AGENT_SPEAK_MODEL
+        }
+      }
+    }
+  };
+}
+
+function startDeepgramAgent(session: LiveSession) {
+  if (!REALTIME_DEEPGRAM_ENABLED || !deepgram) return;
+
+  const conn = deepgram.agent();
+  session.agentConn = conn;
+
+  conn.on(AgentEvents.Open, () => {
+    console.log(`[agent][${session.callSid}] connected`);
+    conn.configure(buildAgentConfig(session));
+    session.keepAliveTimer = setInterval(() => conn.keepAlive(), 5000);
+  });
+
+  conn.on(AgentEvents.Close, () => {
+    console.log(`[agent][${session.callSid}] closed`);
+    if (session.keepAliveTimer) clearInterval(session.keepAliveTimer);
+  });
+
+  conn.on(AgentEvents.Error, (error) => {
+    console.error(`[agent][${session.callSid}] error`, error);
+  });
+
+  conn.on(AgentEvents.ConversationText, (data: unknown) => {
+    const d = data as { role?: string; content?: string };
+    if (!d.content) return;
+    console.log(`[agent][${session.callSid}] ${d.role ?? 'unknown'}=${d.content}`);
+  });
+
+  conn.on(AgentEvents.FunctionCallRequest, async (data: unknown) => {
+    await respondToFunctionCalls(session, data as { functions?: FunctionCallRequest[] });
+  });
+
+  conn.on(AgentEvents.UserStartedSpeaking, () => {
+    if (session.ttsPlaying) {
+      session.playbackToken += 1;
+      clearTwilioPlayback(session);
+      session.ttsPlaying = false;
     }
   });
-  session.deepgramWs = dg;
 
-  dg.on('open', () => {
-    console.log(`[deepgram][${session.callSid}] connected`);
+  conn.on(AgentEvents.Audio, async (chunk: Buffer) => {
+    await playTwilioUlaw(session, Buffer.from(chunk));
   });
+}
 
-  dg.on('message', async (raw) => {
+function stopSession(session: LiveSession) {
+  session.ended = true;
+  if (session.keepAliveTimer) clearInterval(session.keepAliveTimer);
+  if (session.agentConn) {
     try {
-      const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
-      const channel = (msg.channel ?? {}) as Record<string, unknown>;
-      const alternatives = Array.isArray(channel.alternatives)
-        ? (channel.alternatives as Record<string, unknown>[])
-        : [];
-      const transcript = String(alternatives[0]?.transcript ?? '').trim();
-      const isFinal = Boolean(msg.is_final || msg.speech_final);
-
-      if (transcript && !isFinal) {
-        console.log(`[deepgram][${session.callSid}] partial=${transcript}`);
-      }
-      if (transcript && isFinal) {
-        await handleFinalTranscript(session, transcript);
-      }
-    } catch (error) {
-      console.error(`[deepgram][${session.callSid}] message parse error`, error);
+      session.agentConn.disconnect();
+    } catch {
+      // ignore close race
     }
-  });
-
-  dg.on('close', () => {
-    console.log(`[deepgram][${session.callSid}] closed`);
-  });
-
-  dg.on('error', (error) => {
-    console.error(`[deepgram][${session.callSid}] error`, error);
-  });
+  }
 }
 
 wss.on('connection', (ws) => {
@@ -288,18 +437,19 @@ wss.on('connection', (ws) => {
       if (msg.event === 'start' && msg.start?.callSid && msg.start?.streamSid) {
         callSid = msg.start.callSid;
         streamSid = msg.start.streamSid;
+
         const session: LiveSession = {
           callSid,
           streamSid,
           twilioWs: ws,
-          segmentSeq: 0,
-          lastFinalTranscript: '',
           playbackToken: 0,
           ttsPlaying: false,
-          ended: false
+          ended: false,
+          restaurantId: msg.start.customParameters?.restaurant_id,
+          calledNumber: msg.start.customParameters?.called_number
         };
         sessions.set(callSid, session);
-        openDeepgramForSession(session);
+        startDeepgramAgent(session);
 
         const state: SessionState = {
           callSid,
@@ -316,15 +466,17 @@ wss.on('connection', (ws) => {
 
       if (msg.event === 'media' && callSid && msg.media?.payload) {
         const session = sessions.get(callSid);
+
         if (session?.ttsPlaying && rmsFromMulawPayload(msg.media.payload) > 700) {
           session.playbackToken += 1;
           clearTwilioPlayback(session);
           session.ttsPlaying = false;
         }
 
-        if (session?.deepgramWs?.readyState === WebSocket.OPEN) {
+        if (session?.agentConn) {
           const audio = Buffer.from(msg.media.payload, 'base64');
-          session.deepgramWs.send(audio);
+          const ab = audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength);
+          session.agentConn.send(ab);
         }
 
         const rawState = await redis.get(`call:${callSid}`);
@@ -339,13 +491,10 @@ wss.on('connection', (ws) => {
         const id = msg.stop?.callSid ?? callSid;
         const session = sessions.get(id);
         if (session) {
-          session.ended = true;
-          if (session.deepgramWs?.readyState === WebSocket.OPEN) {
-            session.deepgramWs.send(JSON.stringify({ type: 'Finalize' }));
-            session.deepgramWs.close();
-          }
+          stopSession(session);
           sessions.delete(id);
         }
+
         const rawState = await redis.get(`call:${id}`);
         if (rawState) {
           const state = JSON.parse(rawState) as SessionState;
@@ -363,10 +512,7 @@ wss.on('connection', (ws) => {
     if (!callSid) return;
     const session = sessions.get(callSid);
     if (!session) return;
-    session.ended = true;
-    if (session.deepgramWs?.readyState === WebSocket.OPEN) {
-      session.deepgramWs.close();
-    }
+    stopSession(session);
     sessions.delete(callSid);
   });
 });
@@ -374,6 +520,6 @@ wss.on('connection', (ws) => {
 server.listen(WS_PORT, () => {
   console.log(`media-ws listening on :${WS_PORT}`);
   console.log(
-    `[config] REALTIME_DEEPGRAM_ENABLED=${REALTIME_DEEPGRAM_ENABLED} DEEPGRAM_MODEL=${DEEPGRAM_MODEL} DEEPGRAM_TTS_MODEL=${DEEPGRAM_TTS_MODEL}`
+    `[config] REALTIME_DEEPGRAM_ENABLED=${REALTIME_DEEPGRAM_ENABLED} DEEPGRAM_AGENT_LISTEN_MODEL=${DEEPGRAM_AGENT_LISTEN_MODEL} DEEPGRAM_AGENT_SPEAK_MODEL=${DEEPGRAM_AGENT_SPEAK_MODEL} DEEPGRAM_AGENT_THINK_PROVIDER=${DEEPGRAM_AGENT_THINK_PROVIDER} DEEPGRAM_AGENT_THINK_MODEL=${DEEPGRAM_AGENT_THINK_MODEL || 'default'}`
   );
 });
