@@ -204,34 +204,16 @@ async function respondToFunctionCalls(session: LiveSession, req: { functions?: F
 }
 
 function buildAgentConfig(session: LiveSession): AgentLiveSchema {
-  const thinkProvider = {
-    type: DEEPGRAM_AGENT_THINK_PROVIDER,
-    ...(DEEPGRAM_AGENT_THINK_MODEL ? { model: DEEPGRAM_AGENT_THINK_MODEL } : {})
-  };
+  const useDeepgramDefaultThink =
+    DEEPGRAM_AGENT_THINK_PROVIDER.toLowerCase() === 'deepgram' && !DEEPGRAM_AGENT_THINK_MODEL;
 
-  return {
-    audio: {
-      input: {
-        encoding: 'mulaw',
-        sample_rate: 8000
-      },
-      output: {
-        encoding: 'mulaw',
-        sample_rate: 8000,
-        container: 'none'
-      }
-    },
-    agent: {
-      language: DEEPGRAM_AGENT_LANGUAGE,
-      greeting: DEEPGRAM_AGENT_GREETING,
-      listen: {
+  const thinkConfig = useDeepgramDefaultThink
+    ? undefined
+    : {
         provider: {
-          type: 'deepgram',
-          model: DEEPGRAM_AGENT_LISTEN_MODEL
-        }
-      },
-      think: {
-        provider: thinkProvider,
+          type: DEEPGRAM_AGENT_THINK_PROVIDER,
+          ...(DEEPGRAM_AGENT_THINK_MODEL ? { model: DEEPGRAM_AGENT_THINK_MODEL } : {})
+        },
         prompt: `${DEEPGRAM_AGENT_PROMPT}\nRestaurantId: ${session.restaurantId ?? 'unknown'}\nCalledNumber: ${session.calledNumber ?? 'unknown'}`,
         functions: [
           {
@@ -349,7 +331,30 @@ function buildAgentConfig(session: LiveSession): AgentLiveSchema {
             }
           }
         ]
+      };
+
+  return {
+    audio: {
+      input: {
+        encoding: 'mulaw',
+        sample_rate: 8000
       },
+      output: {
+        encoding: 'mulaw',
+        sample_rate: 8000,
+        container: 'none'
+      }
+    },
+    agent: {
+      language: DEEPGRAM_AGENT_LANGUAGE,
+      greeting: DEEPGRAM_AGENT_GREETING,
+      listen: {
+        provider: {
+          type: 'deepgram',
+          model: DEEPGRAM_AGENT_LISTEN_MODEL
+        }
+      },
+      ...(thinkConfig ? { think: thinkConfig } : {}),
       speak: {
         provider: {
           type: 'deepgram',
